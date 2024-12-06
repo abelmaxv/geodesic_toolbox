@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm", "wheel"] 
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geodesic_distance"
+version = "0.0.1"
+authors = [
+  { name="Théau Blanchard", email="theau.blanchard@gehealthcare.com" },
+]
+description = "This package allows to compute geodesic distances between points on a Riemannian manifold. The metric is defined by the user and can be parametrized by a neural network. The whole computation is fully differentiable and can be used in a PyTorch pipeline."
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/pypa/sampleproject"
+Issues = "https://github.com/pypa/sampleproject/issues"
