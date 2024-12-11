@@ -1,5 +1,5 @@
 from torch import Tensor
-from geodesic_distance import GeodesicDistance, CoMetric, identity_metric, hamiltonian
+from geodesic_distance import GeodesicDistance, CoMetric, IdentityCoMetric, hamiltonian
 from typing import Callable
 
 
@@ -22,7 +22,7 @@ class ProjectedGeodesicDistance(GeodesicDistance):
 
     def __init__(
         self,
-        g_inv: CoMetric = identity_metric,
+        g_inv: CoMetric = IdentityCoMetric,
         projection_fn: Callable = lambda x: x,
         lr: float = 0.1,
         n_step: int = 100,
