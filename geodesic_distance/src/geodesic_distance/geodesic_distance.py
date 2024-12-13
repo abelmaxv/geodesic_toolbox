@@ -59,7 +59,7 @@ def scale_lr_magnification(mf: float, base_lr):
 def constant_time_scaling_schedule(x: float) -> float:
     """Constant time scaling schedule.
     Results in ceil(1/dt)*(n_step + 1) integration steps.
-    
+
     Params:
     x : float, current iteration progress (0 to 1)
 
@@ -109,6 +109,7 @@ class GeodesicDistance(torch.nn.Module):
     convergence_threshold : float, if not None, optimise until the distance between the endpoint and the target is below this threshold. Else, optimise for n_step iterations.
     time_scaling_schedule : Callable[float]->float, function from [0,1] to R+ that scales the time step of the integrator. It should be decreasing and such that time_scaling_schedule(1) = 1.
         It is used to decrease the time step as the optimisation converges. Only used when convergence_threshold is None.
+    scale_lr : bool, whether to scale the learning rate with the magnification factor or not. This is to avoid shooting being stuck in high curvature region.
 
     Output:
     distances : Tensor (b,) geodesic distances
@@ -123,6 +124,7 @@ class GeodesicDistance(torch.nn.Module):
         method: str = "euler",
         convergence_threshold: float = None,
         time_scaling_schedule: Callable[[float], float] = cosine_time_scaling_schedule,
+        scale_lr: bool = True,
     ) -> None:
 
         super().__init__()
@@ -134,6 +136,7 @@ class GeodesicDistance(torch.nn.Module):
         self.lr = lr
         self.n_step = n_step
         self.time_scaling_schedule = time_scaling_schedule
+        self.scale_lr = scale_lr
 
         self.last_loss = -1  # For tracing and debug purposes
 
@@ -289,18 +292,21 @@ class GeodesicDistance(torch.nn.Module):
         """
         q0_ = q0.detach().clone().requires_grad_()
         q1_ = q1.detach().clone().requires_grad_()
-        # # Initial guess corresponding to the analytical solution for euclidean space
+        # Initial guess corresponding to the analytical solution for euclidean space
         p0 = ((q1_ - q0_) / 2).detach().requires_grad_()
         # Initial guess corresponding to the analytical solution for constant metric
         # p0 = torch.zeros_like(q0, requires_grad=True, dtype=q0.dtype, device=q0.device)
         # p0.data = 0.5 * self.g_inv.inverse_forward(q0_, q1_ - q0_).detach()
 
         # scale lr with magnification factor
-        mf_0 = magnification_factor(self.g_inv, q0_).max()
-        mf_1 = magnification_factor(self.g_inv, q1_).max()
-        scale = scale_lr_magnification(max(mf_0, mf_1), self.lr)
-        new_lr = self.lr * scale
-        optim = torch.optim.Adam([p0], lr=new_lr)
+        if self.scale_lr:
+            mf_0 = magnification_factor(self.g_inv, q0_).max()
+            mf_1 = magnification_factor(self.g_inv, q1_).max()
+            scale = scale_lr_magnification(max(mf_0, mf_1), self.lr)
+            new_lr = self.lr * scale
+            optim = torch.optim.Adam([p0], lr=new_lr)
+        else:
+            optim = torch.optim.Adam([p0], lr=self.lr)
 
         # @TODO : compute the backward analytically
         p0 = self.optim_method(q0_, q1_, p0, optim)
