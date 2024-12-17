@@ -156,6 +156,7 @@ class GeodesicDistance(torch.nn.Module):
             self.n_step_max = n_step * 5
         else:
             self.optim_method = self._optim_until_step
+            self.convergence_threshold = 1e-5
 
     def euler_step(self, H, p, q):
         """
@@ -327,11 +328,18 @@ class GeodesicDistance(torch.nn.Module):
             loss.backward()
             self.last_loss = torch.linalg.vector_norm(q - q1_, dim=1).detach().cpu().numpy()
             optim.step()
+
+        if self.last_loss.mean() > self.convergence_threshold:
+            print(
+                f"Optimisation did not converge after {self.n_step} steps. MMSE shooting loss : {self.last_loss.mean()}\n last_loss = {self.last_loss}"
+            )
+
         return p0
 
     def _optim_until_convergence(self, q0_, q1_, p0, optim):
         loss = 100
         n_step_min = 5
+        self.n_step_done = 0
         while (
             loss > self.convergence_threshold and self.n_step_done < self.n_step_max
         ) or self.n_step_done < n_step_min:
@@ -342,6 +350,12 @@ class GeodesicDistance(torch.nn.Module):
             self.last_loss = torch.linalg.vector_norm(q - q1_, dim=1).detach().cpu().numpy()
             optim.step()
             self.n_step_done += 1
+
+        if self.n_step_done >= self.n_step_max:
+            print(
+                f"Optimisation did not converge after {self.n_step_max} steps. Last loss : {self.last_loss}"
+            )
+
         return p0
 
     def get_traj(self, q0, q1) -> Tensor:
@@ -365,7 +379,7 @@ class GeodesicDistance(torch.nn.Module):
         # Also add the start and end points allows to propagate the gradients to them
         traj_q = [q.detach() for q in traj_q]
         traj_q[0] = q0
-        traj_q[-1] = q1
+        traj_q[-1] = q1  # Not sure if good idea. If optim failed it can be bad
 
         traj_q = torch.stack(traj_q, dim=1)
         return traj_q
