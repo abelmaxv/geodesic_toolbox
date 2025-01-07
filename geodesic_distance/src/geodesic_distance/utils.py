@@ -1,4 +1,7 @@
 import torch
+from .cometric import CoMetric
+from .geodesic_distance import magnification_factor
+from einops import rearrange
 
 
 def sample_hypersphere(batch_size: int, dim: int, radius: float = 0.95) -> torch.Tensor:
@@ -26,7 +29,7 @@ def sample_hypersphere(batch_size: int, dim: int, radius: float = 0.95) -> torch
     return sphere_samples
 
 
-def delta(u, v):
+def delta(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     num = 2 * torch.linalg.vector_norm(u - v, dim=-1) ** 2
     denum = (1 - torch.linalg.vector_norm(u, dim=-1) ** 2) * (
         1 - torch.linalg.vector_norm(v, dim=-1) ** 2
@@ -34,9 +37,62 @@ def delta(u, v):
     return num / denum
 
 
-def pointcarre_dst(u, v):
+def pointcarre_dst(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return torch.arccosh(1 + delta(u, v))
 
 
-def scaled_euclidean_dst(u, v, scale):
+def scaled_euclidean_dst(
+    u: torch.Tensor, v: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
     return scale.sqrt() * torch.linalg.vector_norm(u - v, dim=-1)
+
+
+def get_bounds(embeddings: torch.Tensor):
+    """
+    Compute the bounds of the embeddings.
+
+    Args:
+    embeddings (torch.Tensor) (n_points, 2), the embeddings of the points.
+
+    Returns:
+    bounds (list): [min_x, max_x, min_y, max_y], the bounds of the embeddings.
+    """
+    min_x, max_x = embeddings[:, 0].min(), embeddings[:, 0].max()
+    min_y, max_y = embeddings[:, 1].min(), embeddings[:, 1].max()
+    bounds = [min_x, max_x, min_y, max_y]
+    return bounds
+
+
+def get_mf_image(
+    cometric: CoMetric,
+    embeddings: torch.Tensor = None,
+    bounds: list = None,
+    resolution: int = 200,
+) -> torch.Tensor:
+    """
+    Compute the magnification factor on the latent space so as to visualize the distortion of the space.
+
+    Args:
+    cometric (CoMetric): The CoMetric object.
+    embeddings (torch.Tensor) (n_points, 2), the embeddings of the points.
+    bounds (list): [min_x, max_x, min_y, max_y], the bounds of the embeddings.
+    resolution (int): The resolution of the grid.
+
+    Returns:
+    mf_image (torch.Tensor) (resolution, resolution), the magnification factor image.
+    """
+    if bounds is None and embeddings is None:
+        raise ValueError("Either bounds or embeddings must be provided.")
+    if bounds is None:
+        bounds = get_bounds(embeddings)
+    min_x, max_x, min_y, max_y = bounds
+
+    x_plot = torch.linspace(min_x, max_x, resolution)
+    y_plot = torch.linspace(min_y, max_y, resolution)
+    xx, yy = torch.meshgrid(x_plot, y_plot, indexing="ij")
+    Q = torch.stack([xx, yy], dim=-1)
+    W, H, _ = Q.shape
+    Q = rearrange(Q, "w h c -> (w h) c")
+    mf_image = magnification_factor(cometric, Q)
+    mf_image = rearrange(mf_image, "(w h) -> w h", w=W, h=H).T
+    return mf_image
