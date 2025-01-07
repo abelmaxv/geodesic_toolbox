@@ -21,7 +21,7 @@ def hamiltonian(G_inv: Tensor, p: Tensor) -> torch.Tensor:
     return res
 
 
-def magnification_factor(g_inv: CoMetric, z: Tensor):
+def magnification_factor(g_inv: CoMetric, z: Tensor) -> Tensor:
     """
     Return the magnification factor as sqrt det G(z).
     This is always well defined because G(z) is positive definite
@@ -38,7 +38,7 @@ def magnification_factor(g_inv: CoMetric, z: Tensor):
     return torch.det(G_inv).pow(-0.5)
 
 
-def scale_lr_magnification(mf: float, base_lr):
+def scale_lr_magnification(mf: float, base_lr: float) -> float:
     """Scales the learning rate according to the magnification factor.
     This is to avoid shooting being stuck in high curvature region.
 
@@ -158,7 +158,7 @@ class GeodesicDistance(torch.nn.Module):
             self.optim_method = self._optim_until_step
             self.convergence_threshold = 1e-5
 
-    def euler_step(self, H, p, q):
+    def euler_step(self, H: Callable, p: Tensor, q: Tensor) -> tuple[Tensor, Tensor]:
         """
         Euler integrator step.
 
@@ -186,7 +186,7 @@ class GeodesicDistance(torch.nn.Module):
 
         return p, q
 
-    def leapfrog_step(self, H, p, q):
+    def leapfrog_step(self, H: Callable, p: Tensor, q: Tensor) -> tuple[Tensor, Tensor]:
         """
         Leapfrog integrator step.
         I don't know if this version is sympletic because here the hamiltonian is not separable.
@@ -314,11 +314,13 @@ class GeodesicDistance(torch.nn.Module):
 
         return p0.detach().requires_grad_()
 
-    def _update_dt(self, curr_iteration: int):
+    def _update_dt(self, curr_iteration: int) -> None:
         self.dt = self.final_dt * self.time_scaling_schedule(curr_iteration / self.n_step)
         self.n_pts = ceil(1 / self.dt)
 
-    def _optim_until_step(self, q0_, q1_, p0, optim):
+    def _optim_until_step(
+        self, q0_: Tensor, q1_: Tensor, p0: Tensor, optim: torch.optim.Optimizer
+    ) -> Tensor:
         for it in range(self.n_step):
             self._update_dt(it)
 
@@ -336,7 +338,9 @@ class GeodesicDistance(torch.nn.Module):
 
         return p0
 
-    def _optim_until_convergence(self, q0_, q1_, p0, optim):
+    def _optim_until_convergence(
+        self, q0_: Tensor, q1_: Tensor, p0: Tensor, optim: torch.optim.Optimizer
+    ) -> Tensor:
         loss = 100
         n_step_min = 5
         self.n_step_done = 0
@@ -358,7 +362,7 @@ class GeodesicDistance(torch.nn.Module):
 
         return p0
 
-    def get_traj(self, q0, q1) -> Tensor:
+    def get_traj(self, q0: Tensor, q1: Tensor) -> Tensor:
         """Given the start and end points, compute the geodesic path between the two.
 
         Params:
@@ -384,7 +388,7 @@ class GeodesicDistance(torch.nn.Module):
         traj_q = torch.stack(traj_q, dim=1)
         return traj_q
 
-    def compute_distance(self, traj_q) -> Tensor:
+    def compute_distance(self, traj_q: Tensor) -> Tensor:
         """Given the trajectory, computes its length according to the metric
 
         Params :
@@ -457,7 +461,7 @@ class GeodesicDistance(torch.nn.Module):
         angle = torch.nn.functional.cosine_similarity(p0, p1, dim=1)
         return angle
 
-    def forward(self, q0, q1) -> Tensor:
+    def forward(self, q0: Tensor, q1: Tensor) -> Tensor:
         """
         Params :
         q0 : Tensor (b,d), start points. It should have requires_grad = True
