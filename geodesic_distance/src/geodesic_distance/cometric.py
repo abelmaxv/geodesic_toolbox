@@ -445,19 +445,19 @@ class DiffeoCometric(CoMetric):
 
     Parameters
     ----------
-    nf_model: torch.nn.Module
+    diffeo: torch.nn.Module
         Neural network model representing the diffeomorphism
     reg_coef: float
         Regularization coefficient for the metric
     """
 
-    def __init__(self, nf_model: torch.nn.Module, reg_coef: float = 1e-3):
+    def __init__(self, diffeo: torch.nn.Module, reg_coef: float = 1e-3):
         super().__init__()
-        self.nf_model = nf_model
+        self.diffeo = diffeo
         self.reg_coef = reg_coef
 
     def metric(self, q: torch.Tensor):
-        jacobian = torch.autograd.functional.jacobian(self.nf_model.forward, q)
+        jacobian = torch.autograd.functional.jacobian(self.diffeo.forward, q)
         # Here we assume that the computation is independent of the batch dimension
         jacobian = torch.einsum("bibj->bij", jacobian)
 
