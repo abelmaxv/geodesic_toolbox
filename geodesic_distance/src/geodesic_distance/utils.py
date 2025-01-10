@@ -1,6 +1,5 @@
 import torch
 from .cometric import CoMetric
-from .geodesic_distance import magnification_factor
 from einops import rearrange
 
 
@@ -63,11 +62,48 @@ def get_bounds(embeddings: torch.Tensor):
     return bounds
 
 
+def magnification_factor(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
+    """
+    Return the magnification factor as sqrt det G(z).
+    This is always well defined because G(z) is positive definite.
+    This implementation is based on the fact that det G(z) = 1 / det G_inv(z).
+
+    Params:
+    g_inv : CoMetric, function that outputs the inverse metric tensor as a (b,d,d) matrix
+    z : Tensor (b,d), point at which to compute the magnification factor
+
+    Output:
+    mf : Tensor (b,), magnification factor
+    """
+
+    G_inv = g_inv(z)
+    return torch.det(G_inv).pow(-0.5)
+
+
+def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
+    """
+    Return the magnification factor as sqrt det G(z).
+    This is always well defined because G(z) is positive definite.
+    This implementation uses the metric tensor instead of the inverse metric tensor.
+
+    Params:
+    g_inv : CoMetric, function that outputs the inverse metric tensor as a (b,d,d) matrix
+    z : Tensor (b,d), point at which to compute the magnification factor
+
+    Output:
+    mf : Tensor (b,), magnification factor
+    """
+
+    G = g_inv.metric(z)
+    return torch.det(G).pow(0.5)
+
+
 def get_mf_image(
     cometric: CoMetric,
     embeddings: torch.Tensor = None,
     bounds: list = None,
     resolution: int = 200,
+    use_mf_metric: bool = False,
 ) -> torch.Tensor:
     """
     Compute the magnification factor on the latent space so as to visualize the distortion of the space.
@@ -93,6 +129,9 @@ def get_mf_image(
     Q = torch.stack([xx, yy], dim=-1)
     W, H, _ = Q.shape
     Q = rearrange(Q, "w h c -> (w h) c")
-    mf_image = magnification_factor(cometric, Q)
+    if use_mf_metric:
+        mf_image = magnification_factor_metric(cometric, Q)
+    else:
+        mf_image = magnification_factor(cometric, Q)
     mf_image = rearrange(mf_image, "(w h) -> w h", w=W, h=H).T
     return mf_image

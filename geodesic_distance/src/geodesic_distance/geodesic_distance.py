@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 from math import ceil, exp, cos
 from .cometric import CoMetric, IdentityCoMetric
+from .utils import magnification_factor
 from collections.abc import Callable
 
 
@@ -21,21 +22,6 @@ def hamiltonian(G_inv: Tensor, p: Tensor) -> torch.Tensor:
     return res
 
 
-def magnification_factor(g_inv: CoMetric, z: Tensor) -> Tensor:
-    """
-    Return the magnification factor as sqrt det G(z).
-    This is always well defined because G(z) is positive definite
-
-    Params:
-    g_inv : CoMetric, function that outputs the inverse metric tensor as a (b,d,d) matrix
-    z : Tensor (b,d), point at which to compute the magnification factor
-
-    Output:
-    mf : Tensor (b,), magnification factor
-    """
-
-    G_inv = g_inv(z)
-    return torch.det(G_inv).pow(-0.5)
 
 
 def scale_lr_magnification(mf: float, base_lr: float) -> float:
