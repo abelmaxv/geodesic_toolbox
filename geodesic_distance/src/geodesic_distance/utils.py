@@ -46,7 +46,7 @@ def scaled_euclidean_dst(
     return scale.sqrt() * torch.linalg.vector_norm(u - v, dim=-1)
 
 
-def get_bounds(embeddings: torch.Tensor):
+def get_bounds(embeddings: torch.Tensor) -> torch.Tensor:
     """
     Compute the bounds of the embeddings.
 
@@ -59,6 +59,7 @@ def get_bounds(embeddings: torch.Tensor):
     min_x, max_x = embeddings[:, 0].min(), embeddings[:, 0].max()
     min_y, max_y = embeddings[:, 1].min(), embeddings[:, 1].max()
     bounds = [min_x, max_x, min_y, max_y]
+    bounds = torch.tensor(bounds)
     return bounds
 
 
@@ -104,6 +105,7 @@ def get_mf_image(
     bounds: list = None,
     resolution: int = 200,
     use_mf_metric: bool = False,
+    max_b_size: int= 512,
 ) -> torch.Tensor:
     """
     Compute the magnification factor on the latent space so as to visualize the distortion of the space.
@@ -113,6 +115,8 @@ def get_mf_image(
     embeddings (torch.Tensor) (n_points, 2), the embeddings of the points.
     bounds (list): [min_x, max_x, min_y, max_y], the bounds of the embeddings.
     resolution (int): The resolution of the grid.
+    use_mf_metric (bool): Whether to use the metric tensor to compute the magnification factor instead of the cometric.
+    max_b_size (int): Maximum batch size for the computation.
 
     Returns:
     mf_image (torch.Tensor) (resolution, resolution), the magnification factor image.
@@ -129,9 +133,11 @@ def get_mf_image(
     Q = torch.stack([xx, yy], dim=-1)
     W, H, _ = Q.shape
     Q = rearrange(Q, "w h c -> (w h) c")
-    if use_mf_metric:
-        mf_image = magnification_factor_metric(cometric, Q)
-    else:
-        mf_image = magnification_factor(cometric, Q)
+    mf_image = torch.zeros(W * H)
+    fn = magnification_factor_metric if use_mf_metric else magnification_factor
+    with torch.no_grad():
+        # batch computation to avoid memory issues
+        for i in range(0, W * H, max_b_size):
+            mf_image[i : i + max_b_size] = fn(cometric, Q[i : i + max_b_size])
     mf_image = rearrange(mf_image, "(w h) -> w h", w=W, h=H).T
     return mf_image

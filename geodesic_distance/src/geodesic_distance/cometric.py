@@ -457,9 +457,12 @@ class DiffeoCometric(CoMetric):
         self.reg_coef = reg_coef
 
     def metric(self, q: torch.Tensor):
-        jacobian = torch.autograd.functional.jacobian(self.diffeo.forward, q)
-        # Here we assume that the computation is independent of the batch dimension
-        jacobian = torch.einsum("bibj->bij", jacobian)
+        if hasattr(self.diffeo, "jacobian"):
+            jacobian = self.diffeo.jacobian(q)
+        else:
+            jacobian = torch.autograd.functional.jacobian(self.diffeo.forward, q)
+            # Here we assume that the computation is independent of the batch dimension
+            jacobian = torch.einsum("bibj->bij", jacobian)
 
         g = jacobian.mT @ jacobian
         g = g + self.reg_coef * self.eye(q)
