@@ -4,10 +4,13 @@ from math import ceil, exp, cos
 from .cometric import CoMetric, IdentityCoMetric
 from .utils import magnification_factor
 from collections.abc import Callable
+import numpy as np
+from scipy.integrate import solve_bvp
+from einops import rearrange
 
 
 @torch.jit.script
-def hamiltonian(G_inv: Tensor, p: Tensor) -> torch.Tensor:
+def hamiltonian(G_inv: Tensor, p: Tensor) -> Tensor:
     """
     Computes the hamiltonian at point q yielding cometric G_inv(q) for the momentum p.
 
@@ -20,8 +23,6 @@ def hamiltonian(G_inv: Tensor, p: Tensor) -> torch.Tensor:
     """
     res = torch.einsum("...i,...ij,...j->...", p, G_inv, p)
     return res
-
-
 
 
 def scale_lr_magnification(mf: float, base_lr: float) -> float:
@@ -222,8 +223,8 @@ class GeodesicDistance(torch.nn.Module):
 
     def shooting(
         self,
-        p0: torch.Tensor,
-        q0: torch.Tensor,
+        p0: Tensor,
+        q0: Tensor,
         return_traj: bool = False,
         return_p: bool = False,
     ) -> Tensor | tuple[list[Tensor], list[Tensor]] | list[Tensor]:
@@ -461,7 +462,605 @@ class GeodesicDistance(torch.nn.Module):
         return distances
 
 
-def dst_mat(a: torch.Tensor, b: torch.Tensor, dst_func: GeodesicDistance) -> torch.Tensor:
+class BVP_wrapper(torch.nn.Module):
+    """
+    Wrapper class for scipy.integrate.solve_bvp to compute geodesic distances.
+    Throughout the code, the position is always given by the fist dim elements of the state.
+
+    Params:
+    cometric : CoMetric
+        cometric object
+    T : int
+        number of time steps
+    dim : int
+        dimension of the space
+    """
+
+    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2):
+        super(BVP_wrapper, self).__init__()
+        self.cometric = cometric
+        self.T = T
+        self.dim = dim
+
+    def fun(self, t: np.ndarray, state: np.ndarray) -> np.ndarray:
+        """Computes the right hand side of whatever ODE we want to solve.
+
+        Parameters
+        ----------
+        t : np.ndarray (m,)
+            time steps
+        state : np.ndarray (2*dim, m)
+            state of the system
+
+        Returns
+        -------
+        f_t : np.ndarray (2*dim, m)
+            right-hand side of the ODE
+        """
+        pass
+
+    def bc_(
+        self,
+        state_init: np.ndarray,
+        state_final: np.ndarray,
+        start_pts: np.ndarray,
+        end_pts: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Computes the boundary conditions of the system
+
+        Parameters
+        ----------
+        state_init : np.ndarray (2*dim,)
+            initial state.
+        state_final : np.ndarray (2*dim,)
+            final state
+        start_pts : np.ndarray (dim,)
+            initial point
+        end_pts : np.ndarray (dim,)
+            final point
+
+        Returns
+        -------
+        bc_cond : np.ndarray (2*dim,)
+            boundary conditions
+        """
+
+        q_0 = state_init[: self.dim]  # initial position (dim,)
+        q_1 = state_final[: self.dim]  # final position (dim,)
+
+        bc_cond = np.zeros_like(state_init)  # (2*dim,)
+        bc_cond[: self.dim] = q_0 - start_pts
+        bc_cond[self.dim :] = q_1 - end_pts
+
+        return bc_cond
+
+    def bc_fun(self, start_pts: np.ndarray, end_pts: np.ndarray) -> Callable:
+        """
+        Wrapper around bc_ to make it compatible with scipy.integrate.solve_bvp
+
+        Parameters
+        ----------
+        start_pts : np.ndarray (dim,)
+            initial point
+        end_pts : np.ndarray (dim,)
+            final point
+
+        Returns
+        -------
+        bc : Callable
+            boundary conditions function
+        """
+
+        def bc(state_init, state_final):
+            return self.bc_(state_init, state_final, start_pts, end_pts)
+
+        return bc
+
+    def solve_equation(self, start_pts: Tensor, end_pts: Tensor):
+        """
+        Solves the equation between two points
+
+        Parameters
+        ----------
+        start_pts : Tensor(dim,)
+            initial point
+        end_pts : Tensor(dim,)
+            final point
+
+        Returns
+        -------
+        state : BVPResult
+            solution of the BVP
+        """
+        pass
+
+    def get_trajectories(self, start_pts: Tensor, end_pts: Tensor) -> Tensor:
+        """
+        Computes the geodesic trajectories between two points
+
+        Parameters
+        ----------
+        start_pts : Tensor(b,dim)
+            initial point
+        end_pts : Tensor(b,dim)
+            final point
+
+        Output:
+        traj_q : Tensor(b,T,dim)
+            points on the trajectories
+        """
+
+        traj_q = []
+        t = np.linspace(0, 1, self.T)
+        for b in range(start_pts.shape[0]):
+            state = self.solve_equation(start_pts[b], end_pts[b])
+            if state.status != 0:
+                print(f"Failed to solve BVP for batch {b}. Got\n{state}")
+            traj = state.sol(t)[: self.dim].T
+            traj_q.append(torch.from_numpy(traj))
+        return torch.stack(traj_q, dim=0)
+
+    def compute_distance(self, traj_q: Tensor) -> Tensor:
+        """Given the trajectory, computes its length according to the metric
+
+        Params :
+        traj_q : Tensor (b,n_pts,d), points on the trajectories
+
+        Output :
+        distances : Tensor, distances of the trajectories
+        """
+        traj_front = traj_q[:, 1:, :]
+        traj_back = traj_q[:, :-1, :]
+        segments = traj_front - traj_back
+        midpoints = (traj_front + traj_back) / 2
+
+        distances = torch.stack(
+            [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
+        )  # Forward per batch, could be slightly faster but whatever
+        distances = torch.einsum("bni,bni->bn", segments, distances)
+        # Add a ReLU to avoid negative distances due to numerical errors
+        distances = distances.relu().sqrt().sum(dim=1)
+        return distances
+
+    def forward(self, start_pts: Tensor, end_pts: Tensor):
+        traj_q = self.get_trajectories(start_pts, end_pts)
+        distances = self.compute_distance(traj_q)
+        return distances
+
+
+class BVP_shooting(BVP_wrapper):
+    """
+    BVP solver for Hamiltonian system.
+    It is usually pretty slow and not very stable.
+    Typically when the metric explodes around manifold boundaries the algorithm fails.
+    For example on the pointcarre metric, it fails when the points are near the boundary of the sphere.
+
+    Params:
+    cometric : CoMetric
+        cometric object
+    T : int
+        number of time steps
+    dim : int
+        dimension of the space
+    """
+
+    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2):
+        super().__init__(cometric=cometric, dim=dim, T=T)
+
+    def compute_hamiltonian(self, p: Tensor, q: Tensor) -> Tensor:
+        """
+        Computes the Hamiltonian at point q for momentum p.
+
+        Params:
+        p : Tensor, (b,d) momentum
+        q : Tensor, (b,d) position
+
+        Output:
+        res : Tensor, (b,) hamiltonian
+        """
+        return hamiltonian(self.cometric(q), p).float()
+
+    def compute_derivative(
+        self, q: np.ndarray, p: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Computes the derivative of the Hamiltonian w.r.t. q and p
+
+        Parameters
+        ----------
+        q : np.ndarray (m,dim)
+            position
+        p : np.ndarray (m,dim)
+            momentum
+
+        Returns
+        -------
+        dp : np.ndarray (m,dim)
+            derivative of the Hamiltonian w.r.t. p
+        dq : np.ndarray (m,dim)
+            derivative of the Hamiltonian w.r.t. q
+        """
+        p = torch.from_numpy(p).requires_grad_().float()
+        q = torch.from_numpy(q).requires_grad_().float()
+        with torch.enable_grad():
+            dp, dq = torch.autograd.grad(
+                self.compute_hamiltonian(p, q).sum(),
+                [p, q],
+                create_graph=True,
+                allow_unused=True,
+                materialize_grads=True,
+                # retain_graph=True,
+            )
+        dp = dp.detach().numpy()
+        dq = dq.detach().numpy()
+        return dp, dq
+
+    def fun(self, t: np.ndarray, state: np.ndarray) -> np.ndarray:
+        """
+        Computes the right-hand side of the Hamiltonian system
+
+        Parameters
+        ----------
+        t : np.ndarray (m,)
+            time steps
+        state : np.ndarray (2*dim, m)
+            state of the system
+
+        Returns
+        -------
+        f_t : np.ndarray (2*dim, m)
+            right-hand side of the Hamiltonian system
+        """
+        q = state[: self.dim].T  # (dim, m)
+        p = state[self.dim :].T  # (dim, m)
+        dH_dp, dH_dq = self.compute_derivative(q, p)
+
+        f_t = np.zeros_like(state)
+        f_t[: self.dim] = dH_dp.T
+        f_t[self.dim :] = dH_dq.T
+        return f_t
+
+    def solve_equation(self, start_pts: Tensor, end_pts: Tensor):
+        """
+        Solves the Hamiltonian system between two points
+
+        Parameters
+        ----------
+        start_pts : Tensor(dim,)
+            initial point
+        end_pts : Tensor(dim,)
+            final point
+
+        Returns
+        -------
+        state : BVPResult
+            solution of the BVP
+        """
+        start_pts = start_pts.detach().numpy()
+        end_pts = end_pts.detach().numpy()
+
+        t = np.linspace(0, 1, self.T)
+
+        state_init = np.zeros((2 * self.dim, self.T))
+
+        # Init position with linear interpolation
+        init_q = t * start_pts[:, None] + (1 - t) * end_pts[:, None]
+        # And velocity with difference
+        init_p = (end_pts - start_pts)[:, None]
+        state_init[: self.dim, :] = init_q
+        state_init[self.dim :, :] = init_p
+        bc = self.bc_fun(start_pts, end_pts)
+        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T)
+        return state
+
+
+def batched_kro(a: Tensor, b: Tensor) -> Tensor:
+    """
+    Compute the kronecker product between two batch of matrices p and q
+
+    Parameters
+    ----------
+    a : Tensor
+        (batch_size, m,n)
+    b : Tensor
+        (batch_size, p,q)
+
+    Returns
+    -------
+    Tensor
+        (batch_size, m*p, n*q)
+    """
+    kro_prod = torch.einsum("bmn,bpq->bmpnq", a, b)
+    kro_prod = rearrange(kro_prod, "b m p n q -> b (m p) (n q)")
+    return kro_prod
+
+
+def vector_kro(p: Tensor, q: Tensor) -> Tensor:
+    """Compute the kronecker product between two batches of vector p and q
+
+    Parameters
+    ----------
+    p : Tensor
+        (b,m)
+    q : Tensor
+        (b,n)
+
+    Returns
+    -------
+    Tensor
+        (b, m*n)
+    """
+    kro_prod = batched_kro(p.unsqueeze(2), q.unsqueeze(2))
+    kro_prod = kro_prod.squeeze(2)
+    return kro_prod
+
+
+def vec(M: Tensor) -> Tensor:
+    """Stack the columns of M
+
+    Parameters
+    ----------
+    M : Tensor
+        (b,m, n)
+
+    Returns
+    -------
+    Tensor
+        (b, m*n)
+    """
+
+    return rearrange(M, "b m n -> b (m n)")
+
+
+class BVP_ode(BVP_wrapper):
+    """
+    BVP solver for the geodesic equation.
+    Albeit slower than the shooting method, it is more stable and can handle more complex metrics.
+    At least it seems to work on the pointcarre metric.
+
+    Parameters
+    ----------
+    cometric : CoMetric
+        cometric object
+    T : int
+        number of time steps
+    dim : int
+        dimension of the space
+    """
+
+    def __init__(self, cometric=CoMetric, T=100, dim=2):
+        super().__init__(cometric=cometric, dim=dim, T=T)
+
+    def get_dVecM(self, gamma: Tensor) -> Tensor:
+        """
+        Compute the derivative of the flatten metric tensor
+
+        Parameters
+        ----------
+        gamma : Tensor
+            (m,d,1) position
+
+        Returns
+        -------
+        Tensor
+            (m,d*d,d) derivative of the flatten metric tensor
+        """
+        assert gamma.ndim == 3, "gamma must have shape (m,d,1)"
+        assert gamma.shape[1] == self.dim, f"gamma must have shape (m,{self.dim},1)"
+        assert gamma.shape[2] == 1, "gamma must have shape (m,d,1)"
+
+        with torch.enable_grad():
+            dVecM = torch.autograd.functional.jacobian(
+                lambda gamma: vec(self.cometric.metric(gamma)), gamma.squeeze(2)
+            )
+            # Assume batch independent computation
+            dVecM = torch.einsum("b D B d -> b D d", dVecM)  # D=d*d
+
+        assert (
+            dVecM.shape[1] == self.dim * self.dim
+        ), f"{dVecM.shape = }, should be (m,{self.dim*self.dim},{self.dim})"
+        return dVecM
+
+    def geodesic_equation(self, gamma: Tensor, gamma_dot: Tensor) -> Tensor:
+        """Compute acceleration term of the geodesic equation
+
+        gamma : Tensor
+            (m,d,1) position
+        gamma_dot : Tensor
+            (m,d,1) velocity
+
+        Returns
+        -------
+        Tensor
+            (m,d,1) acceleration
+        """
+
+        assert gamma.ndim == 3, f"gamma must have shape (m,d,1), got {gamma.shape = }"
+        assert (
+            gamma_dot.ndim == 3
+        ), f"gamma_dot must have shape (m,d,1), got {gamma_dot.shape = }"
+        assert (
+            gamma.shape[1] == self.dim
+        ), f"gamma must have shape (m,{self.dim},1), got {gamma.shape = }"
+        assert (
+            gamma_dot.shape[1] == self.dim
+        ), f"gamma_dot must have shape (m,{self.dim},1), got {gamma_dot.shape = }"
+        assert gamma.shape[2] == 1, f"gamma must have shape (m,d,1), got {gamma.shape = }"
+
+        m = gamma.shape[0]
+        id = torch.eye(self.dim).repeat(m, 1, 1)
+        kro_gammadot_id = batched_kro(gamma_dot.mT, id)
+        kro_gammadot = batched_kro(gamma_dot, gamma_dot)
+
+        M_inv = self.cometric(gamma.squeeze(2))
+        dVecM = self.get_dVecM(gamma)
+
+        a = 2 * kro_gammadot_id @ dVecM @ gamma_dot
+        b = dVecM.mT @ kro_gammadot
+        gamma_dotdot = -0.5 * M_inv @ (a - b)
+
+        assert (
+            gamma_dotdot.shape == gamma_dot.shape
+        ), f"{gamma_dotdot.shape = }, expected {gamma_dot.shape = }"
+
+        return gamma_dotdot
+
+    def state_to_ode(self, state: np.ndarray) -> tuple[Tensor, Tensor]:
+        """
+        Unpack the state into position and velocity
+
+        Parameters
+        ----------
+        state : array
+            (2*d,m) state of the system
+
+        Returns
+        -------
+        gamma : Tensor
+            (m,d,1) position
+        gamma_dot : Tensor
+            (m,d,1) velocity
+        """
+
+        assert state.ndim == 2, f"state must have shape (2*d,m), got {state.shape = }"
+        assert (
+            state.shape[0] == 2 * self.dim
+        ), f"state must have shape (2*{self.dim},m), got {state.shape = }"
+
+        gamma = torch.from_numpy(state[: self.dim]).T
+        gamma_dot = torch.from_numpy(state[self.dim :]).T
+
+        assert (
+            gamma.shape[0] == gamma_dot.shape[0] and gamma.shape[1] == gamma_dot.shape[1]
+        ), "gamma and gamma_dot must have the same shape"
+
+        gamma = gamma.unsqueeze(-1).float()
+        gamma_dot = gamma_dot.unsqueeze(-1).float()
+
+        assert (
+            gamma.ndim == 3 and gamma_dot.ndim == 3
+        ), f"gamma and gamma_dot must have shape (m,d,1), got {gamma.shape = }, {gamma_dot.shape = }"
+        assert (
+            gamma.shape[1] == self.dim
+        ), f"gamma must have shape (m,{self.dim},1), got {gamma.shape = }"
+        assert (
+            gamma.shape[2] == 1 and gamma_dot.shape[2] == 1
+        ), f"gamma and gamma_dot must have shape (m,d,1), got {gamma.shape = }, {gamma_dot.shape = }"
+
+        return gamma, gamma_dot
+
+    def ode_to_state(self, gamma: Tensor, gamma_dot: Tensor) -> np.ndarray:
+        """
+        Pack the position and velocity into a state
+
+        Parameters
+        ----------
+        gamma : Tensor (m,d,1) position
+        gamma_dot : Tensor (m,d,1) velocity
+
+        Returns
+        -------
+        np.ndarray
+            (2*d,m) state of the system
+        """
+
+        assert gamma.ndim == 3, f"gamma must have shape (m,d,1), got {gamma.shape = }"
+        assert (
+            gamma_dot.ndim == 3
+        ), f"gamma_dot must have shape (m,d,1), got {gamma_dot.shape = }"
+        assert (
+            gamma.shape[1] == self.dim
+        ), f"gamma must have shape (m,{self.dim},1), got {gamma.shape = }"
+        assert (
+            gamma_dot.shape[1] == self.dim
+        ), f"gamma_dot must have shape (m,{self.dim},1), got {gamma_dot.shape = }"
+
+        gamma = gamma.squeeze(2).numpy()
+        gamma_dot = gamma_dot.squeeze(2).numpy()
+        state = np.concatenate([gamma, gamma_dot], axis=1).T
+
+        assert state.ndim == 2, f"state must have shape (2*d,m), got {state.shape = }"
+        assert (
+            state.shape[0] == 2 * self.dim
+        ), f"state must have shape (2*{self.dim},m), got {state.shape = }"
+
+        return state
+
+    def fun(self, t: np.ndarray, state: np.ndarray) -> np.ndarray:
+        """
+        Compute the right-hand side of the geodesic equation
+
+        Parameters
+        ----------
+        t : array (m,) evaluation time
+        state : array (2*dim, m) state of the system at all time steps t
+
+        Returns
+        -------
+        array (2*dim, m)
+            right-hand side of the geodesic equation
+        """
+
+        assert state.ndim == 2, f"state must have shape (2*d,m), got {state.shape = }"
+        assert (
+            state.shape[0] == 2 * self.dim
+        ), f"state must have shape (2*{self.dim},m), got {state.shape = }"
+        assert state.shape[1] == len(
+            t
+        ), f"state must have shape (2*{self.dim},m), got {state.shape = }, m = {len(t) = }"
+
+        gamma, gamma_dot = self.state_to_ode(state)
+        gamma_dotdot = self.geodesic_equation(gamma, gamma_dot)
+        state = self.ode_to_state(gamma_dot, gamma_dotdot)
+        return state
+
+    def solve_equation(self, start_pts: Tensor, end_pts: Tensor):
+        """
+        Solves the geodesic equation between two points
+
+        Parameters
+        ----------
+        start_pts : Tensor(dim,)
+            initial point
+        end_pts : Tensor(dim,)
+            final point
+
+        Returns
+        -------
+        state : BVPResult
+            solution of the geodesic equation
+        """
+
+        assert start_pts.ndim == 1, f"start_pts must have shape (d,), got {start_pts.shape = }"
+        assert (
+            start_pts.shape[0] == self.dim
+        ), f"start_pts must have shape ({self.dim},), got {start_pts.shape = }"
+        assert end_pts.ndim == 1, f"end_pts must have shape (d,), got {end_pts.shape = }"
+        assert (
+            end_pts.shape[0] == self.dim
+        ), f"end_pts must have shape ({self.dim},), got {end_pts.shape = }"
+
+        start_pts = start_pts.detach().numpy()
+        end_pts = end_pts.detach().numpy()
+
+        t = np.linspace(0, 1, self.T)
+
+        state_init = np.zeros((2 * self.dim, self.T))
+        # Init the trajectory with a linear interpolation
+        init_q = t * start_pts[:, None] + (1 - t) * end_pts[:, None]
+        # And the velocity with the difference
+        init_q_dot = (end_pts - start_pts)[:, None] / 2
+
+        state_init[: self.dim, :] = init_q
+        state_init[self.dim :, :] = init_q_dot
+
+        bc = self.bc_fun(start_pts, end_pts)
+        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T)
+        return state
+
+
+def dst_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
     """
     Compute geodesic distances between the points a and b according to the metric g
 
@@ -490,7 +1089,7 @@ def dst_mat(a: torch.Tensor, b: torch.Tensor, dst_func: GeodesicDistance) -> tor
     return dst
 
 
-def angle_mat(a: torch.Tensor, b: torch.Tensor, dst_func: GeodesicDistance) -> torch.Tensor:
+def angle_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
     """
     Compute geodesic angle between the points a and b according to the metric g
 
@@ -519,9 +1118,7 @@ def angle_mat(a: torch.Tensor, b: torch.Tensor, dst_func: GeodesicDistance) -> t
     return dst
 
 
-def dst_mat_naive(
-    a: torch.Tensor, b: torch.Tensor, dst_func: GeodesicDistance
-) -> torch.Tensor:
+def dst_mat_naive(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
     """
     Compute geodesic distances between the points a and b according to the metric g
 
@@ -550,10 +1147,10 @@ def dst_mat_naive(
 
 
 def dst_mat_vectorized(
-    a: torch.Tensor,
-    b: torch.Tensor,
+    a: Tensor,
+    b: Tensor,
     dst_func: GeodesicDistance,
-) -> torch.Tensor:
+) -> Tensor:
     """
     Compute geodesic distances between points a and b efficiently.
     Vectorizes the computation to avoid explicit loops.
