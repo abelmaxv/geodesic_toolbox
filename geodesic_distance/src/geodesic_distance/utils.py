@@ -78,7 +78,7 @@ def magnification_factor(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
     """
 
     G_inv = g_inv(z)
-    return torch.det(G_inv).pow(-0.5)
+    return torch.det(G_inv).abs().pow(-0.5)
 
 
 def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
@@ -96,7 +96,7 @@ def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tenso
     """
 
     G = g_inv.metric(z)
-    return torch.det(G).pow(0.5)
+    return torch.det(G).abs().pow(0.5)
 
 
 def get_mf_image(
@@ -105,7 +105,7 @@ def get_mf_image(
     bounds: list = None,
     resolution: int = 200,
     use_mf_metric: bool = False,
-    max_b_size: int= 512,
+    max_b_size: int = 512,
 ) -> torch.Tensor:
     """
     Compute the magnification factor on the latent space so as to visualize the distortion of the space.
