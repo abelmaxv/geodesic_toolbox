@@ -349,7 +349,7 @@ class GeodesicDistance(torch.nn.Module):
 
         return p0
 
-    def get_traj(self, q0: Tensor, q1: Tensor) -> Tensor:
+    def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
         """Given the start and end points, compute the geodesic path between the two.
 
         Params:
@@ -457,7 +457,7 @@ class GeodesicDistance(torch.nn.Module):
         Output :
         distances : Tensor (b,) geodesic distances
         """
-        traj_q = self.get_traj(q0, q1)
+        traj_q = self.get_trajectories(q0, q1)
         distances = self.compute_distance(traj_q)
         return distances
 
@@ -474,13 +474,16 @@ class BVP_wrapper(torch.nn.Module):
         number of time steps
     dim : int
         dimension of the space
+    verbose : int
+        verbosity level of scipy.integrate.solve_bvp
     """
 
-    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2):
+    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2,verbose=0):
         super(BVP_wrapper, self).__init__()
         self.cometric = cometric
         self.T = T
         self.dim = dim
+        self.verbose = verbose
 
     def fun(self, t: np.ndarray, state: np.ndarray) -> np.ndarray:
         """Computes the right hand side of whatever ODE we want to solve.
@@ -590,7 +593,6 @@ class BVP_wrapper(torch.nn.Module):
         traj_q : Tensor(b,T,dim)
             points on the trajectories
         """
-
         traj_q = []
         t = np.linspace(0, 1, self.T)
         for b in range(start_pts.shape[0]):
@@ -645,8 +647,8 @@ class BVP_shooting(BVP_wrapper):
         dimension of the space
     """
 
-    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2):
-        super().__init__(cometric=cometric, dim=dim, T=T)
+    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2, verbose=0):
+        super().__init__(cometric=cometric, dim=dim, T=T, verbose=verbose)
 
     def compute_hamiltonian(self, p: Tensor, q: Tensor) -> Tensor:
         """
@@ -751,7 +753,7 @@ class BVP_shooting(BVP_wrapper):
         state_init[: self.dim, :] = init_q
         state_init[self.dim :, :] = init_p
         bc = self.bc_fun(start_pts, end_pts)
-        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T)
+        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T, verbose=self.verbose)
         return state
 
 
@@ -829,8 +831,8 @@ class BVP_ode(BVP_wrapper):
         dimension of the space
     """
 
-    def __init__(self, cometric=CoMetric, T=100, dim=2):
-        super().__init__(cometric=cometric, dim=dim, T=T)
+    def __init__(self, cometric=CoMetric, T=100, dim=2, verbose=0):
+        super().__init__(cometric=cometric, dim=dim, T=T, verbose=verbose)
 
     def get_dVecM(self, gamma: Tensor) -> Tensor:
         """
@@ -976,8 +978,8 @@ class BVP_ode(BVP_wrapper):
             gamma_dot.shape[1] == self.dim
         ), f"gamma_dot must have shape (m,{self.dim},1), got {gamma_dot.shape = }"
 
-        gamma = gamma.squeeze(2).numpy()
-        gamma_dot = gamma_dot.squeeze(2).numpy()
+        gamma = gamma.squeeze(2).detach().numpy()
+        gamma_dot = gamma_dot.squeeze(2).detach().numpy()
         state = np.concatenate([gamma, gamma_dot], axis=1).T
 
         assert state.ndim == 2, f"state must have shape (2*d,m), got {state.shape = }"
@@ -1056,7 +1058,7 @@ class BVP_ode(BVP_wrapper):
         state_init[self.dim :, :] = init_q_dot
 
         bc = self.bc_fun(start_pts, end_pts)
-        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T)
+        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T, verbose=self.verbose)
         return state
 
 
