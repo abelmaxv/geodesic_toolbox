@@ -588,7 +588,7 @@ class BVP_wrapper(torch.nn.Module):
         """
         pass
 
-    def get_trajectories(self, start_pts: Tensor, end_pts: Tensor,init_traj=None) -> Tensor:
+    def get_trajectories(self, start_pts: Tensor, end_pts: Tensor, init_traj=None) -> Tensor:
         """
         Computes the geodesic trajectories between two points
 
@@ -736,7 +736,7 @@ class BVP_shooting(BVP_wrapper):
         f_t[self.dim :] = dH_dq.T
         return f_t
 
-    def solve_equation(self, start_pts: Tensor, end_pts: Tensor, init_traj: Tensor=None):
+    def solve_equation(self, start_pts: Tensor, end_pts: Tensor, init_traj: Tensor = None):
         """
         Solves the Hamiltonian system between two points
 
@@ -763,8 +763,8 @@ class BVP_shooting(BVP_wrapper):
         if init_traj is not None:
             traj_front = init_traj[1:, :]
             traj_back = init_traj[:-1, :]
-            init_p = traj_front - traj_back # (T-1,dim)
-            init_p = torch.cat([init_p, init_p[-1].unsqueeze(0)], dim=0) # (T,dim)
+            init_p = traj_front - traj_back  # (T-1,dim)
+            init_p = torch.cat([init_p, init_p[-1].unsqueeze(0)], dim=0)  # (T,dim)
             state_init[: self.dim, :] = init_traj.detach().numpy().T
             state_init[self.dim :, :] = init_p.detach().numpy().T
 
@@ -1042,7 +1042,7 @@ class BVP_ode(BVP_wrapper):
         state = self.ode_to_state(gamma_dot, gamma_dotdot)
         return state
 
-    def solve_equation(self, start_pts: Tensor, end_pts: Tensor,init_traj=None):
+    def solve_equation(self, start_pts: Tensor, end_pts: Tensor, init_traj=None):
         """
         Solves the geodesic equation between two points
 
@@ -1079,8 +1079,8 @@ class BVP_ode(BVP_wrapper):
         if init_traj is not None:
             traj_front = init_traj[1:, :]
             traj_back = init_traj[:-1, :]
-            init_p = traj_front - traj_back # (T-1,dim)
-            init_p = torch.cat([init_p, init_p[-1].unsqueeze(0)], dim=0) # (T,dim)
+            init_p = traj_front - traj_back  # (T-1,dim)
+            init_p = torch.cat([init_p, init_p[-1].unsqueeze(0)], dim=0)  # (T,dim)
             state_init[: self.dim, :] = init_traj.detach().numpy().T
             state_init[self.dim :, :] = init_p.detach().numpy().T
         else:
@@ -1437,6 +1437,56 @@ class SolverGraph(torch.nn.Module):
         """
         traj_q = self.get_trajectories(q0, q1)
         dst = self.compute_distance(traj_q)
+        return dst
+
+
+class CascadeSolver(torch.nn.Module):
+    def __init__(
+        self, cometric: CoMetric, data: Tensor, n_neighbors: int, dt: float, dim: int
+    ) -> None:
+        super().__init__()
+        self.solver_init = SolverGraph(cometric, data, n_neighbors, dt)
+        self.T = self.solver_init.T
+        self.solver = BVP_ode(cometric, self.T, dim)
+
+    def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
+        """
+        Compute the geodesic trajectories between two points.
+        First find a suitable trajectory in the graph and then solve the BVP between the two points.
+
+        Parameters:
+        -----------
+        q0 : Tensor (b,d)
+            The starting points
+        q1 : Tensor (b,d)
+            The ending points
+
+        Returns:
+        --------
+        pts_on_traj : Tensor (b,T,d)
+            The points on the trajectory
+        """
+        pts_on_traj = self.solver_init.get_trajectories(q0, q1)
+        pts_on_traj = self.solver.get_trajectories(q0, q1, init_traj=pts_on_traj)
+        return pts_on_traj
+
+    def forward(self, q0: Tensor, q1: Tensor) -> Tensor:
+        """Given two batch of points q0 and q1, compute the estimated graph geodesic distance between them
+
+        Parameters:
+        -----------
+        q0 : Tensor (B,d)
+            The starting points
+        q1 : Tensor (B,d)
+            The ending points
+
+        Returns:
+        --------
+        dst : Tensor (B,)
+            The estimated geodesic distance between the points
+        """
+        traj_q = self.get_trajectories(q0, q1)
+        dst = self.solver.compute_distance(traj_q)
         return dst
 
 
