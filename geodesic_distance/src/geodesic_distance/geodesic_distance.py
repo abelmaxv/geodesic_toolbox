@@ -16,6 +16,7 @@ from .utils import magnification_factor
 
 from tqdm import tqdm
 
+
 @torch.jit.script
 def hamiltonian(G_inv: Tensor, p: Tensor) -> Tensor:
     """
@@ -485,7 +486,7 @@ class BVP_wrapper(torch.nn.Module):
         verbosity level of scipy.integrate.solve_bvp
     """
 
-    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2,verbose=0):
+    def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2, verbose=0):
         super(BVP_wrapper, self).__init__()
         self.cometric = cometric
         self.T = T
@@ -760,9 +761,10 @@ class BVP_shooting(BVP_wrapper):
         state_init[: self.dim, :] = init_q
         state_init[self.dim :, :] = init_p
         bc = self.bc_fun(start_pts, end_pts)
-        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T, verbose=self.verbose)
+        state = solve_bvp(
+            self.fun, bc, t, state_init, max_nodes=5 * self.T, verbose=self.verbose
+        )
         return state
-
 
 
 class SolverGraph(torch.nn.Module):
@@ -810,9 +812,9 @@ class SolverGraph(torch.nn.Module):
             distances, indices = knn.kneighbors(data)
             # The indicies of the kNN for each data point
             Weight_matrix = np.zeros((N_data, N_data))
-            for ni in range(N_data):  # For all the data
-                # if ni % 100 == 0:
-                #     print("[Initialize Graph] [Processed point: {}/{}]".format(ni, N_data))
+            # for ni in range(N_data):
+            pbar = tqdm(range(N_data), desc="Initialize Graph", unit="point")
+            for ni in pbar:
                 p_i = data[ni, :].reshape(1, -1)  # Get the data point
                 kNN_inds = indices[ni, 1:]  # Find the Euclidean kNNs
                 p_j = data[kNN_inds, :]  # The kNN points (n_neighbors, d)
@@ -1105,7 +1107,7 @@ class SolverGraph(torch.nn.Module):
         traj_q = self.get_trajectories(q0, q1)
         dst = self.compute_distance(traj_q)
         return dst
-    
+
 
 def batched_kro(a: Tensor, b: Tensor) -> Tensor:
     """
@@ -1408,7 +1410,9 @@ class BVP_ode(BVP_wrapper):
         state_init[self.dim :, :] = init_q_dot
 
         bc = self.bc_fun(start_pts, end_pts)
-        state = solve_bvp(self.fun, bc, t, state_init, max_nodes=5 * self.T, verbose=self.verbose)
+        state = solve_bvp(
+            self.fun, bc, t, state_init, max_nodes=5 * self.T, verbose=self.verbose
+        )
         return state
 
 
