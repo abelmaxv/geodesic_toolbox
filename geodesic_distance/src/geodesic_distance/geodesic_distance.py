@@ -873,9 +873,6 @@ class BVP_ode(BVP_wrapper):
         Tensor
             (m,d*d,d) derivative of the flatten metric tensor
         """
-        assert gamma.ndim == 3, "gamma must have shape (m,d,1)"
-        assert gamma.shape[1] == self.dim, f"gamma must have shape (m,{self.dim},1)"
-        assert gamma.shape[2] == 1, "gamma must have shape (m,d,1)"
 
         with torch.enable_grad():
             dVecM = torch.autograd.functional.jacobian(
@@ -884,9 +881,6 @@ class BVP_ode(BVP_wrapper):
             # Assume batch independent computation
             dVecM = torch.einsum("b D B d -> b D d", dVecM)  # D=d*d
 
-        assert (
-            dVecM.shape[1] == self.dim * self.dim
-        ), f"{dVecM.shape = }, should be (m,{self.dim*self.dim},{self.dim})"
         return dVecM
 
     def geodesic_equation(self, gamma: Tensor, gamma_dot: Tensor) -> Tensor:
@@ -902,19 +896,6 @@ class BVP_ode(BVP_wrapper):
         Tensor
             (m,d,1) acceleration
         """
-
-        assert gamma.ndim == 3, f"gamma must have shape (m,d,1), got {gamma.shape = }"
-        assert (
-            gamma_dot.ndim == 3
-        ), f"gamma_dot must have shape (m,d,1), got {gamma_dot.shape = }"
-        assert (
-            gamma.shape[1] == self.dim
-        ), f"gamma must have shape (m,{self.dim},1), got {gamma.shape = }"
-        assert (
-            gamma_dot.shape[1] == self.dim
-        ), f"gamma_dot must have shape (m,{self.dim},1), got {gamma_dot.shape = }"
-        assert gamma.shape[2] == 1, f"gamma must have shape (m,d,1), got {gamma.shape = }"
-
         m = gamma.shape[0]
         id = torch.eye(self.dim).repeat(m, 1, 1)
         kro_gammadot_id = batched_kro(gamma_dot.mT, id)
@@ -926,10 +907,6 @@ class BVP_ode(BVP_wrapper):
         a = 2 * kro_gammadot_id @ dVecM @ gamma_dot
         b = dVecM.mT @ kro_gammadot
         gamma_dotdot = -0.5 * M_inv @ (a - b)
-
-        assert (
-            gamma_dotdot.shape == gamma_dot.shape
-        ), f"{gamma_dotdot.shape = }, expected {gamma_dot.shape = }"
 
         return gamma_dotdot
 
@@ -949,31 +926,11 @@ class BVP_ode(BVP_wrapper):
         gamma_dot : Tensor
             (m,d,1) velocity
         """
-
-        assert state.ndim == 2, f"state must have shape (2*d,m), got {state.shape = }"
-        assert (
-            state.shape[0] == 2 * self.dim
-        ), f"state must have shape (2*{self.dim},m), got {state.shape = }"
-
         gamma = torch.from_numpy(state[: self.dim]).T
         gamma_dot = torch.from_numpy(state[self.dim :]).T
 
-        assert (
-            gamma.shape[0] == gamma_dot.shape[0] and gamma.shape[1] == gamma_dot.shape[1]
-        ), "gamma and gamma_dot must have the same shape"
-
         gamma = gamma.unsqueeze(-1).float()
         gamma_dot = gamma_dot.unsqueeze(-1).float()
-
-        assert (
-            gamma.ndim == 3 and gamma_dot.ndim == 3
-        ), f"gamma and gamma_dot must have shape (m,d,1), got {gamma.shape = }, {gamma_dot.shape = }"
-        assert (
-            gamma.shape[1] == self.dim
-        ), f"gamma must have shape (m,{self.dim},1), got {gamma.shape = }"
-        assert (
-            gamma.shape[2] == 1 and gamma_dot.shape[2] == 1
-        ), f"gamma and gamma_dot must have shape (m,d,1), got {gamma.shape = }, {gamma_dot.shape = }"
 
         return gamma, gamma_dot
 
@@ -992,25 +949,9 @@ class BVP_ode(BVP_wrapper):
             (2*d,m) state of the system
         """
 
-        assert gamma.ndim == 3, f"gamma must have shape (m,d,1), got {gamma.shape = }"
-        assert (
-            gamma_dot.ndim == 3
-        ), f"gamma_dot must have shape (m,d,1), got {gamma_dot.shape = }"
-        assert (
-            gamma.shape[1] == self.dim
-        ), f"gamma must have shape (m,{self.dim},1), got {gamma.shape = }"
-        assert (
-            gamma_dot.shape[1] == self.dim
-        ), f"gamma_dot must have shape (m,{self.dim},1), got {gamma_dot.shape = }"
-
         gamma = gamma.squeeze(2).detach().numpy()
         gamma_dot = gamma_dot.squeeze(2).detach().numpy()
         state = np.concatenate([gamma, gamma_dot], axis=1).T
-
-        assert state.ndim == 2, f"state must have shape (2*d,m), got {state.shape = }"
-        assert (
-            state.shape[0] == 2 * self.dim
-        ), f"state must have shape (2*{self.dim},m), got {state.shape = }"
 
         return state
 
@@ -1028,15 +969,6 @@ class BVP_ode(BVP_wrapper):
         array (2*dim, m)
             right-hand side of the geodesic equation
         """
-
-        assert state.ndim == 2, f"state must have shape (2*d,m), got {state.shape = }"
-        assert (
-            state.shape[0] == 2 * self.dim
-        ), f"state must have shape (2*{self.dim},m), got {state.shape = }"
-        assert state.shape[1] == len(
-            t
-        ), f"state must have shape (2*{self.dim},m), got {state.shape = }, m = {len(t) = }"
-
         gamma, gamma_dot = self.state_to_ode(state)
         gamma_dotdot = self.geodesic_equation(gamma, gamma_dot)
         state = self.ode_to_state(gamma_dot, gamma_dotdot)
@@ -1060,16 +992,6 @@ class BVP_ode(BVP_wrapper):
         state : BVPResult
             solution of the geodesic equation
         """
-
-        assert start_pts.ndim == 1, f"start_pts must have shape (d,), got {start_pts.shape = }"
-        assert (
-            start_pts.shape[0] == self.dim
-        ), f"start_pts must have shape ({self.dim},), got {start_pts.shape = }"
-        assert end_pts.ndim == 1, f"end_pts must have shape (d,), got {end_pts.shape = }"
-        assert (
-            end_pts.shape[0] == self.dim
-        ), f"end_pts must have shape ({self.dim},), got {end_pts.shape = }"
-
         start_pts = start_pts.detach().numpy()
         end_pts = end_pts.detach().numpy()
 
@@ -1126,33 +1048,58 @@ class SolverGraph(torch.nn.Module):
         self.W, self.knn = self.init_knn_graph(data, n_neighbors)
         self.predecessors = self.get_predecessors()
 
-    def init_knn_graph(self, data: torch.Tensor, n_neighbors: int) -> torch.Tensor:
+    def init_knn_graph(
+        self, data: torch.Tensor, n_neighbors: int, b_size: int = 64
+    ) -> torch.Tensor:
         """Initialize the graph using a KNN graph.
-        The weights are the metric length of the linear trajectory.
-        This is way too slow.
+
+        Parameters
+        ----------
+        data : torch.Tensor (N,D)
+            The data points
+        n_neighbors : int
+            The number of neighbors to use
+        b_size : int
+            The size of the batch to use for the computation
+
+        Returns
+        -------
+        W : torch.Tensor (N,N)
+            The weight matrix of the graph
+        knn : NearestNeighbors
+            The KNN object
         """
         # We add one to the number of neighbors to remove the point itself
         knn = NearestNeighbors(n_neighbors=n_neighbors + 1, algorithm="ball_tree")
         knn.fit(data)
+        t = torch.arange(0, 1, self.dt).view(1, 1, -1, 1)
 
+        # Find the Euclidean kNN
+        N_data = data.shape[0]
+        _, indices = knn.kneighbors(data)
+        indices = indices[:, 1:]  # Remove the point itself
+        Weight_matrix = np.zeros((N_data, N_data))
+
+        num_batches = (N_data + b_size - 1) // b_size
+
+        pbar = tqdm(range(num_batches), desc="Initialize Graph", unit="batch")
         with torch.no_grad():
-            t = torch.arange(0, 1, self.dt)
+            for batch_idx in pbar:
+                start = batch_idx * b_size
+                end = min(start + b_size, N_data)
+                batch_idx = torch.arange(start, end)
+                curr_idx = indices[batch_idx]
 
-            # Find the Euclidean kNN
-            N_data = data.shape[0]
-            distances, indices = knn.kneighbors(data)
-            # The indicies of the kNN for each data point
-            Weight_matrix = np.zeros((N_data, N_data))
-            # for ni in range(N_data):
-            pbar = tqdm(range(N_data), desc="Initialize Graph", unit="point")
-            for ni in pbar:
-                p_i = data[ni, :].reshape(1, -1)  # Get the data point
-                kNN_inds = indices[ni, 1:]  # Find the Euclidean kNNs
-                p_j = data[kNN_inds, :]  # The kNN points (n_neighbors, d)
-                linear_traj = self.linear_interpolation(p_i, p_j, t)  # (n_neighbors, n_pts, d)
-                curve_length = self.compute_distance(linear_traj)  # (n_neighbors,)
-                Weight_matrix[ni, kNN_inds] = curve_length
-            W = 0.5 * (Weight_matrix + Weight_matrix.T)
+                p_i = data[batch_idx][:, None, None, :]
+                p_j = data[curr_idx][:, :, None, :]
+
+                linear_traj = p_i + t * (p_j - p_i)
+                linear_traj = rearrange(linear_traj, "b k T d -> (b k) T d")
+                curve_length = self.compute_distance(linear_traj)
+                curve_length = rearrange(curve_length, "(b k) -> b k", b=batch_idx.shape[0])
+                Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length
+
+        W = 0.5 * (Weight_matrix + Weight_matrix.T)
         return W, knn
 
     def get_predecessors(self) -> torch.Tensor:
