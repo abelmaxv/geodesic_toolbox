@@ -478,3 +478,40 @@ class DiffeoCometric(CoMetric):
 
     def extra_repr(self) -> str:
         return f"reg_coef={self.reg_coef}"
+
+
+class LiftedCometric(CoMetric):
+    """
+    Assume an original manifold of metric g.
+    We add a function h to condition such that it diverges toward +inf for unwanted values.
+    Then we consider the lifted metric :
+    g_lifted = g + beta * grad(h) @ grad(h)^T
+
+    Parameters
+    ----------
+    base_cometric: CoMetric
+        The original metric tensor
+    h: torch.nn.Module
+        The function to condition the metric
+    beta: float
+        The scaling factor for the conditioning
+    """
+
+    def __init__(self, base_cometric: CoMetric, h: torch.nn.Module, beta: float = 1):
+        super().__init__()
+        self.base_cometric = base_cometric
+        self.h = h
+        self.beta = beta
+
+    def metric(self, q: torch.Tensor):
+        g_base = self.base_cometric.metric(q)
+        grad_h = torch.autograd.functional.jacobian(self.h, q)
+        # Assume batch independant computation
+        grad_h = torch.einsum("bkBd->bd", grad_h)[:, :, None]
+        g_h = grad_h @ grad_h.mT
+        g = g_base + self.beta * g_h
+        return g
+
+    def forward(self, q):
+        g = self.metric(q)
+        return torch.linalg.inv(g)
