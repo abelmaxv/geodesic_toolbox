@@ -875,11 +875,14 @@ class BVP_ode(BVP_wrapper):
         """
 
         with torch.enable_grad():
-            dVecM = torch.autograd.functional.jacobian(
-                lambda gamma: vec(self.cometric.metric(gamma)), gamma.squeeze(2)
-            )
-            # Assume batch independent computation
-            dVecM = torch.einsum("b D B d -> b D d", dVecM)  # D=d*d
+            if hasattr(self.cometric, "jacobian"):
+                dVecM = self.cometric.jacobian(gamma.squeeze(2))
+            else:
+                dVecM = torch.autograd.functional.jacobian(
+                    lambda gamma: vec(self.cometric.metric(gamma)), gamma.squeeze(2)
+                )
+                # Assume batch independent computation
+                dVecM = torch.einsum("b D B d -> b D d", dVecM)  # D=d*d
 
         return dVecM
 
@@ -1413,8 +1416,21 @@ class CascadeSolver(torch.nn.Module):
         pts_on_traj : Tensor (b,T,d)
             The points on the trajectory
         """
-        pts_on_traj = self.solver_init.get_trajectories(q0, q1)
-        pts_on_traj = self.solver.get_trajectories(q0, q1, init_traj=pts_on_traj)
+        pts_on_traj_knn = self.solver_init.get_trajectories(q0, q1)
+        # pts_on_traj = self.solver.get_trajectories(q0, q1, init_traj=pts_on_traj_knn)
+
+        # Solve the BVP between the two points, if failed return the graph based trajectory
+        traj_q = []
+        t = np.linspace(0, 1, self.T)
+        for b in range(q0.shape[0]):
+            init_traj_b = pts_on_traj_knn[b]
+            state = self.solver.solve_equation(q0[b], q1[b], init_traj_b)
+            if state.status != 0:
+                traj = pts_on_traj_knn[b]
+            else:
+                traj = state.sol(t)[: self.dim].T
+            traj_q.append(torch.from_numpy(traj))
+        pts_on_traj = torch.stack(traj_q, dim=0)
         return pts_on_traj
 
     def forward(self, q0: Tensor, q1: Tensor) -> Tensor:
