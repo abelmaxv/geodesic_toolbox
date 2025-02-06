@@ -456,14 +456,14 @@ class DiffeoCometric(CoMetric):
         self.diffeo = diffeo
         self.reg_coef = reg_coef
 
-    def metric(self, q: torch.Tensor):
         if hasattr(self.diffeo, "jacobian"):
-            jacobian = self.diffeo.jacobian(q)
+            self.jacobian = self.diffeo.jacobian
         else:
-            jacobian = torch.autograd.functional.jacobian(self.diffeo.forward, q)
-            # Here we assume that the computation is independent of the batch dimension
-            jacobian = torch.einsum("bibj->bij", jacobian)
+            jacobian_ = torch.func.jacrev(self.diffeo)
+            self.jacobian = lambda x: torch.einsum("bibj->bij", jacobian_(x))
 
+    def metric(self, q: torch.Tensor):
+        jacobian = self.jacobian(q)
         g = jacobian.mT @ jacobian
         g = g + self.reg_coef * self.eye(q)
         return g
@@ -502,12 +502,13 @@ class LiftedCometric(CoMetric):
         self.base_cometric = base_cometric
         self.h = h
         self.beta = beta
+        
+        grad_ = torch.func.jacrev(self.h)
+        self.grad_h = lambda x: torch.einsum("bBd->bd", grad_(x))[:, :, None]
 
     def metric(self, q: torch.Tensor):
         g_base = self.base_cometric.metric(q)
-        grad_h = torch.autograd.functional.jacobian(self.h, q)
-        # Assume batch independant computation
-        grad_h = torch.einsum("bkBd->bd", grad_h)[:, :, None]
+        grad_h = self.grad_h(q)
         g_h = grad_h @ grad_h.mT
         g = g_base + self.beta * g_h
         return g

@@ -151,7 +151,10 @@ class GeodesicDistance(torch.nn.Module):
             self.n_step_max = n_step * 5
         else:
             self.optim_method = self._optim_until_step
-            self.convergence_threshold = 1e-5
+            self.convergence_threshold = 1e-3
+
+        self.H = lambda p, q: hamiltonian(self.g_inv(q), p)
+        self.get_dp_dq = torch.func.grad(lambda p, q: self.H(p, q).sum(), argnums=(0, 1))
 
     def euler_step(self, H: Callable, p: Tensor, q: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -167,15 +170,7 @@ class GeodesicDistance(torch.nn.Module):
         q : Tensor, (b,d) new position
         """
         with torch.enable_grad():
-            dp, dq = torch.autograd.grad(
-                H(p, q).sum(),
-                [p, q],
-                create_graph=True,
-                allow_unused=True,
-                materialize_grads=True,
-                # retain_graph=True,
-            )
-
+            dp, dq = self.get_dp_dq(p, q)
         p = p - self.dt * dq
         q = q + self.dt * dp
 
@@ -198,33 +193,17 @@ class GeodesicDistance(torch.nn.Module):
 
         # Half step in momentum
         with torch.enable_grad():
-            dq = torch.autograd.grad(
-                H(p, q).sum(),
-                q,
-                create_graph=True,
-                allow_unused=True,
-                materialize_grads=True,
-            )[0]
+            dq = self.get_dp_dq(p, q)[1]
         p_half = p - 0.5 * self.dt * dq
 
         # Full step in position
         with torch.enable_grad():
-            dp_half = torch.autograd.grad(
-                H(p_half, q).sum(),
-                p_half,
-                create_graph=True,
-            )[0]
+            dp_half = self.get_dp_dq(p_half, q)[0]
         q = q + self.dt * dp_half
 
         # Another half step in momentum
         with torch.enable_grad():
-            dq = torch.autograd.grad(
-                H(p_half, q).sum(),
-                q,
-                create_graph=True,
-                allow_unused=True,
-                materialize_grads=True,
-            )[0]
+            dq = self.get_dp_dq(p_half, q)[1]
         p = p_half - 0.5 * self.dt * dq
 
         return p, q
@@ -256,10 +235,10 @@ class GeodesicDistance(torch.nn.Module):
             traj_q = [q]
         if return_p:
             traj_p = [p]
-        H = lambda p, q: hamiltonian(self.g_inv(q), p)
+        # H = lambda p, q: hamiltonian(self.g_inv(q), p)
 
         for _ in range(self.n_pts):
-            p, q = self.integration_step(H, p, q)
+            p, q = self.integration_step(self.H, p, q)
 
             if return_traj:
                 traj_q.append(q)
@@ -662,6 +641,9 @@ class BVP_shooting(BVP_wrapper):
 
     def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2, verbose=0):
         super().__init__(cometric=cometric, dim=dim, T=T, verbose=verbose)
+        self.get_dp_dq = torch.func.grad(
+            lambda p, q: self.compute_hamiltonian(p, q).sum(), argnums=(0, 1)
+        )
 
     def compute_hamiltonian(self, p: Tensor, q: Tensor) -> Tensor:
         """
@@ -698,15 +680,9 @@ class BVP_shooting(BVP_wrapper):
         """
         p = torch.from_numpy(p).requires_grad_().float()
         q = torch.from_numpy(q).requires_grad_().float()
+
         with torch.enable_grad():
-            dp, dq = torch.autograd.grad(
-                self.compute_hamiltonian(p, q).sum(),
-                [p, q],
-                create_graph=True,
-                allow_unused=True,
-                materialize_grads=True,
-                # retain_graph=True,
-            )
+            dp, dq = self.get_dp_dq(p, q)
         dp = dp.detach().numpy()
         dq = dq.detach().numpy()
         return dp, dq
@@ -859,31 +835,18 @@ class BVP_ode(BVP_wrapper):
     def __init__(self, cometric=CoMetric, T=100, dim=2, verbose=0):
         super().__init__(cometric=cometric, dim=dim, T=T, verbose=verbose)
 
-    def get_dVecM(self, gamma: Tensor) -> Tensor:
+        if hasattr(self.cometric, "jacobian"):
+            self.get_dVecM = lambda gamma: self.cometric.jacobian(gamma.squeeze(2))
+        else:
+            self.get_dVecM = self.compute_dVecM
+
+    def compute_dVecM(self) -> Callable:
         """
         Compute the derivative of the flatten metric tensor
-
-        Parameters
-        ----------
-        gamma : Tensor
-            (m,d,1) position
-
-        Returns
-        -------
-        Tensor
-            (m,d*d,d) derivative of the flatten metric tensor
         """
-
-        with torch.enable_grad():
-            if hasattr(self.cometric, "jacobian"):
-                dVecM = self.cometric.jacobian(gamma.squeeze(2))
-            else:
-                dVecM = torch.autograd.functional.jacobian(
-                    lambda gamma: vec(self.cometric.metric(gamma)), gamma.squeeze(2)
-                )
-                # Assume batch independent computation
-                dVecM = torch.einsum("b D B d -> b D d", dVecM)  # D=d*d
-
+        eval_VecM = lambda gamma: vec(self.cometric.metric(gamma.squeeze(2)))
+        jac_ = torch.func.jacrev(eval_VecM)
+        dVecM = lambda gamma: torch.einsum("b D B d -> b D d", jac_(gamma))
         return dVecM
 
     def geodesic_equation(self, gamma: Tensor, gamma_dot: Tensor) -> Tensor:
