@@ -1067,6 +1067,24 @@ class SolverGraph(torch.nn.Module):
 
         W = 0.5 * (Weight_matrix + Weight_matrix.T)
         return W, knn
+    
+    def get_similarity_matrix(self, W, sigma=1):
+        """Compute the similarity matrix using the weight matrix W
+
+        Parameters
+        ----------
+        W : torch.Tensor (N,N)
+            The weight matrix
+        sigma : float
+            The sigma to use for the similarity matrix
+
+        Returns
+        -------
+        S : torch.Tensor (N,N)
+            The similarity matrix
+        """
+        S = torch.exp(-W / (2 * sigma ** 2))
+        return S
 
     def get_predecessors(self) -> torch.Tensor:
         """Get the predecessors for the shortest path computation"""
