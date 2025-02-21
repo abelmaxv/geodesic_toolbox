@@ -10,7 +10,7 @@ authors = [
 ]
 description = "This package allows to compute geodesic distances between points on a Riemannian manifold. The metric is defined by the user and can be parametrized by a neural network. The whole computation is fully differentiable and can be used in a PyTorch pipeline."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
