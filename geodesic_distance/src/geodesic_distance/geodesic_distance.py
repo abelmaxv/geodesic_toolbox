@@ -85,12 +85,12 @@ class GeodesicDistanceSolver(torch.nn.module):
         return dst
 
 
-class GeodesicDistance(GeodesicDistanceSolver):
+class ShootingSolver(GeodesicDistanceSolver):
     """Compute the geodesic distance by shooting and integrating the hamiltonian equations.
     The integration method can be either Euler or Leapfrog.
 
     Params:
-    g_inv : CoMetric, function that outputs the inverse metric tensor as a (b,d,d) matrix
+    cometric : CoMetric, function that outputs the inverse metric tensor as a (b,d,d) matrix
     lr : float, learning rate for the initial momentum optimisation
     n_step : int, number of optimisation step done
     dt : float, final integration step of the hamiltonian. It is higly recommended to choose a value such that dt* ceil(1/dt) = 1 for numerical stability
@@ -106,7 +106,7 @@ class GeodesicDistance(GeodesicDistanceSolver):
 
     def __init__(
         self,
-        g_inv: CoMetric = IdentityCoMetric(),
+        cometric: CoMetric = IdentityCoMetric(),
         lr: float = 0.1,
         n_step: int = 100,
         dt: float = 0.01,
@@ -116,9 +116,7 @@ class GeodesicDistance(GeodesicDistanceSolver):
         scale_lr: bool = True,
     ) -> None:
 
-        super().__init__(cometric=g_inv)
-
-        self.g_inv = g_inv
+        super().__init__(cometric=cometric)
         self.dt = dt
         self.final_dt = dt
         self.n_pts = ceil(1 / self.dt)
@@ -147,8 +145,35 @@ class GeodesicDistance(GeodesicDistanceSolver):
             self.optim_method = self._optim_until_step
             self.convergence_threshold = 1e-3
 
-        self.H = lambda p, q: hamiltonian(self.g_inv(q), p)
-        self.get_dp_dq = torch.func.grad(lambda p, q: self.H(p, q).sum(), argnums=(0, 1))
+        self.dH_ = torch.func.jacrev(lambda p, q: self.H(p, q).sum(), argnums=(0, 1))
+
+    def get_dp_dq(self, p: Tensor, q: Tensor) -> tuple[Tensor, Tensor]:
+        """ 
+        Computes the partial derivatives of the Hamiltonian w.r.t. p and q.
+
+        Params:
+        p : Tensor, (b,d) momentum
+        q : Tensor, (b,d) position
+
+        Output:
+        dH_dp : Tensor, (b,d) partial derivative of the Hamiltonian w.r.t. p
+        dH_dq : Tensor, (b,d) partial derivative of the Hamiltonian w.r.t. q
+        """
+        dH_dp, dH_dq = self.dH_(p, q)
+        return dH_dp, dH_dq
+        
+    def H(self,p: Tensor, q: Tensor) -> Tensor:
+        """
+        Computes the Hamiltonian at point q for momentum p.
+
+        Params:
+        p : Tensor, (b,d) momentum
+        q : Tensor, (b,d) position
+
+        Output:
+        res : Tensor, (b,) hamiltonian
+        """
+        return hamiltonian(self.cometric(q), p)
 
     def euler_step(self, H: Callable, p: Tensor, q: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -229,7 +254,7 @@ class GeodesicDistance(GeodesicDistanceSolver):
             traj_q = [q]
         if return_p:
             traj_p = [p]
-        # H = lambda p, q: hamiltonian(self.g_inv(q), p)
+        # H = lambda p, q: hamiltonian(self.cometric(q), p)
 
         for _ in range(self.n_pts):
             p, q = self.integration_step(self.H, p, q)
@@ -265,12 +290,12 @@ class GeodesicDistance(GeodesicDistanceSolver):
         p0 = ((q1_ - q0_) / 2).detach().requires_grad_()
         # Initial guess corresponding to the analytical solution for constant metric
         # p0 = torch.zeros_like(q0, requires_grad=True, dtype=q0.dtype, device=q0.device)
-        # p0.data = 0.5 * self.g_inv.inverse_forward(q0_, q1_ - q0_).detach()
+        # p0.data = 0.5 * self.cometric.inverse_forward(q0_, q1_ - q0_).detach()
 
         # scale lr with magnification factor
         if self.scale_lr:
-            mf_0 = magnification_factor(self.g_inv, q0_).max()
-            mf_1 = magnification_factor(self.g_inv, q1_).max()
+            mf_0 = magnification_factor(self.cometric, q0_).max()
+            mf_1 = magnification_factor(self.cometric, q1_).max()
             scale = scale_lr_magnification(max(mf_0, mf_1), self.lr)
             new_lr = self.lr * scale
             optim = torch.optim.Adam([p0], lr=new_lr)
@@ -438,8 +463,7 @@ class BVP_wrapper(GeodesicDistanceSolver):
     """
 
     def __init__(self, cometric: CoMetric, T: int = 100, dim: int = 2, verbose=0):
-        super(BVP_wrapper, self).__init__()
-        self.cometric = cometric
+        super(BVP_wrapper, self).__init__(cometric)
         self.T = T
         self.dim = dim
         self.verbose = verbose
@@ -891,8 +915,7 @@ class SolverGraph(GeodesicDistanceSolver):
     def __init__(
         self, cometric: CoMetric, data: torch.Tensor, n_neighbors: int, dt: float = 0.01
     ) -> None:
-        super().__init__()
-        self.cometric = cometric
+        super().__init__(cometric)
         self.data = data
         self.n_neighbors = n_neighbors
         self.dt = dt
@@ -1221,7 +1244,7 @@ class CascadeSolver(GeodesicDistanceSolver):
     def __init__(
         self, cometric: CoMetric, data: Tensor, n_neighbors: int, dt: float, dim: int
     ) -> None:
-        super().__init__()
+        super().__init__(cometric)
         self.solver_init = SolverGraph(cometric, data, n_neighbors, dt)
         self.T = self.solver_init.T
         self.solver = BVP_ode(cometric, self.T, dim)
