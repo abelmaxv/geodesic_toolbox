@@ -114,6 +114,7 @@ class ShootingSolver(GeodesicDistanceSolver):
         convergence_threshold: float = None,
         time_scaling_schedule: Callable[[float], float] = cosine_time_scaling_schedule,
         scale_lr: bool = True,
+        verbose:bool = False,
     ) -> None:
 
         super().__init__(cometric=cometric)
@@ -124,6 +125,7 @@ class ShootingSolver(GeodesicDistanceSolver):
         self.n_step = n_step
         self.time_scaling_schedule = time_scaling_schedule
         self.scale_lr = scale_lr
+        self.verbose = verbose
 
         self.last_loss = -1  # For tracing and debug purposes
 
@@ -324,7 +326,7 @@ class ShootingSolver(GeodesicDistanceSolver):
             self.last_loss = torch.linalg.vector_norm(q - q1_, dim=1).detach().cpu().numpy()
             optim.step()
 
-        if self.last_loss.mean() > self.convergence_threshold:
+        if self.last_loss.mean() > self.convergence_threshold and self.verbose:
             print(
                 f"Optimisation did not converge after {self.n_step} steps. MMSE shooting loss : {self.last_loss.mean()}\n last_loss = {self.last_loss}"
             )
@@ -348,7 +350,7 @@ class ShootingSolver(GeodesicDistanceSolver):
             optim.step()
             self.n_step_done += 1
 
-        if self.n_step_done >= self.n_step_max:
+        if self.n_step_done >= self.n_step_max and self.verbose:
             print(
                 f"Optimisation did not converge after {self.n_step_max} steps. Last loss : {self.last_loss}"
             )
