@@ -57,8 +57,8 @@ class CoMetric(torch.nn.Module):
         id : Tensor (b,d,d) batch of identity matrices
         """
         B, dim = x.shape
-        id = torch.eye(dim, dtype=x.dtype).unsqueeze(0)
-        id = id.expand(B, -1, -1).to(x.device)
+        id = torch.eye(dim, dtype=x.dtype,device=x.device).unsqueeze(0)
+        id = id.expand(B, -1, -1)
         return id
 
 
@@ -153,7 +153,6 @@ class FunctionnalHeightMapCometric(CoMetric):
     def forward(self, q):
         g = self.metric(q)
         g_inv = torch.linalg.inv(g)
-
         return g_inv
 
 

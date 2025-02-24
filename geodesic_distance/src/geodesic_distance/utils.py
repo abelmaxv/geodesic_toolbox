@@ -1,6 +1,8 @@
 import torch
+from torch import Tensor
 from .cometric import CoMetric
 from einops import rearrange
+from math import ceil, exp, cos
 
 
 def sample_hypersphere(batch_size: int, dim: int, radius: float = 0.95) -> torch.Tensor:
@@ -99,6 +101,80 @@ def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tenso
     return torch.det(G).abs().pow(0.5)
 
 
+@torch.jit.script
+def hamiltonian(G_inv: Tensor, p: Tensor) -> Tensor:
+    """
+    Computes the hamiltonian at point q yielding cometric G_inv(q) for the momentum p.
+
+    Params:
+    G_inv : Tensor, (b,d,d) cometric tensor
+    p : Tensor, (b,d) momentum
+
+    Output:
+    res : Tensor, (b,) hamiltonian
+    """
+    res = torch.einsum("...i,...ij,...j->...", p, G_inv, p)
+    return res
+
+
+def scale_lr_magnification(mf: float, base_lr: float) -> float:
+    """Scales the learning rate according to the magnification factor.
+    This is to avoid shooting being stuck in high curvature region.
+
+    Params:
+    mf : float, magnification factor
+    base_lr : float, base learning rate
+
+    Output:
+    new_lr : float, scaled learning rate
+    """
+    max_scale = 50
+    min_scale = 0.1
+    coef = 0.5
+    new_lr = (1 - exp(-coef * mf)) * max_scale * base_lr + min_scale * base_lr
+    return new_lr
+
+
+def constant_time_scaling_schedule(x: float) -> float:
+    """Constant time scaling schedule.
+    Results in ceil(1/dt)*(n_step + 1) integration steps.
+
+    Params:
+    x : float, current iteration progress (0 to 1)
+
+    Output:
+    scaling : float, scaling factor
+    """
+    return 1
+
+
+def linear_time_scaling_schedule(x: float, max_scaling: float = 5) -> float:
+    """Linear ramp from max_scaling to 1.
+    Results in ()*(n_step + 1) integration steps.
+
+    Params:
+    x : float, current iteration progress (0 to 1)
+    max_scaling : float, maximum scaling factor
+
+    Output:
+    scaling : float, scaling factor
+    """
+    return 1 + (max_scaling - 1) * (1 - x)
+
+
+def cosine_time_scaling_schedule(x: float, max_scaling: float = 5) -> float:
+    """Cosine decay from max_scaling to 1
+
+    Params:
+    x : float, current iteration progress (0 to 1)
+    max_scaling : float, maximum scaling factor
+
+    Output:
+    scaling : float, scaling factor
+    """
+    return 1 + (max_scaling - 1) * (1 + cos(x * 3.1415)) / 2
+
+
 def get_mf_image(
     cometric: CoMetric,
     embeddings: torch.Tensor = None,
@@ -141,3 +217,61 @@ def get_mf_image(
             mf_image[i : i + max_b_size] = fn(cometric, Q[i : i + max_b_size])
     mf_image = rearrange(mf_image, "(w h) -> w h", w=W, h=H).T
     return mf_image
+
+def batched_kro(a: Tensor, b: Tensor) -> Tensor:
+    """
+    Compute the kronecker product between two batch of matrices p and q
+
+    Parameters
+    ----------
+    a : Tensor
+        (batch_size, m,n)
+    b : Tensor
+        (batch_size, p,q)
+
+    Returns
+    -------
+    Tensor
+        (batch_size, m*p, n*q)
+    """
+    kro_prod = torch.einsum("bmn,bpq->bmpnq", a, b)
+    kro_prod = rearrange(kro_prod, "b m p n q -> b (m p) (n q)")
+    return kro_prod
+
+
+def vector_kro(p: Tensor, q: Tensor) -> Tensor:
+    """Compute the kronecker product between two batches of vector p and q
+
+    Parameters
+    ----------
+    p : Tensor
+        (b,m)
+    q : Tensor
+        (b,n)
+
+    Returns
+    -------
+    Tensor
+        (b, m*n)
+    """
+    kro_prod = batched_kro(p.unsqueeze(2), q.unsqueeze(2))
+    kro_prod = kro_prod.squeeze(2)
+    return kro_prod
+
+
+def vec(M: Tensor) -> Tensor:
+    """Stack the columns of M
+
+    Parameters
+    ----------
+    M : Tensor
+        (b,m, n)
+
+    Returns
+    -------
+    Tensor
+        (b, m*n)
+    """
+
+    return rearrange(M, "b m n -> b (m n)")
+

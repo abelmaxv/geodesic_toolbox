@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from torch import Tensor
-from math import ceil, exp, cos
+from math import ceil
 from einops import rearrange
 from collections.abc import Callable
 from scipy.integrate import solve_bvp
@@ -12,86 +12,80 @@ from scipy.sparse.csgraph import shortest_path
 from scipy.interpolate import CubicSpline
 
 from .cometric import CoMetric, IdentityCoMetric
-from .utils import magnification_factor
+from .utils import (
+    magnification_factor,
+    hamiltonian,
+    cosine_time_scaling_schedule,
+    scale_lr_magnification,
+    vec,
+    batched_kro,
+)
 
 from tqdm import tqdm
 
 
-@torch.jit.script
-def hamiltonian(G_inv: Tensor, p: Tensor) -> Tensor:
-    """
-    Computes the hamiltonian at point q yielding cometric G_inv(q) for the momentum p.
+class GeodesicDistanceSolver(torch.nn.module):
+    """Base class for geodesic distance solvers."""
 
-    Params:
-    G_inv : Tensor, (b,d,d) cometric tensor
-    p : Tensor, (b,d) momentum
+    def __init__(self, cometric: CoMetric = IdentityCoMetric()):
+        super().__init__()
+        self.cometric = cometric
 
-    Output:
-    res : Tensor, (b,) hamiltonian
-    """
-    res = torch.einsum("...i,...ij,...j->...", p, G_inv, p)
-    return res
+    def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
+        """Given the start and end points, compute the geodesic path between the two.
 
+        Params:
+        q0 : Tensor (b,d), start points.
+        q1 : Tensor (b,d), end points
 
-def scale_lr_magnification(mf: float, base_lr: float) -> float:
-    """Scales the learning rate according to the magnification factor.
-    This is to avoid shooting being stuck in high curvature region.
+        Output:
+        traj_q : Tensor (b,n_pts,dim), points on the trajectory
+        """
+        pass
 
-    Params:
-    mf : float, magnification factor
-    base_lr : float, base learning rate
+    def compute_distance(self, traj_q: Tensor) -> Tensor:
+        """Given the trajectory, computes its length according to the metric
 
-    Output:
-    new_lr : float, scaled learning rate
-    """
-    max_scale = 50
-    min_scale = 0.1
-    coef = 0.5
-    new_lr = (1 - exp(-coef * mf)) * max_scale * base_lr + min_scale * base_lr
-    return new_lr
+        Params :
+        traj_q : Tensor (b,n_pts,d), points on the trajectories
 
+        Output :
+        distances : Tensor, (b,), distances of the trajectories
+        """
+        traj_front = traj_q[:, 1:, :]
+        traj_back = traj_q[:, :-1, :]
+        segments = traj_front - traj_back
+        midpoints = (traj_front + traj_back) / 2
 
-def constant_time_scaling_schedule(x: float) -> float:
-    """Constant time scaling schedule.
-    Results in ceil(1/dt)*(n_step + 1) integration steps.
+        distances = torch.stack(
+            [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
+        )  # Forward per batch, could be slightly faster but whatever
+        distances = torch.einsum("bni,bni->bn", segments, distances)
+        # Add a ReLU to avoid negative distances due to numerical errors
+        distances = distances.relu().sqrt().sum(dim=1)
+        return distances
 
-    Params:
-    x : float, current iteration progress (0 to 1)
+    def forward(self, q0: Tensor, q1: Tensor) -> Tensor:
+        """Given two batch of points q0 and q1, compute the geodesic distance between them.
 
-    Output:
-    scaling : float, scaling factor
-    """
-    return 1
+        Parameters:
+        -----------
+        q0 : Tensor (B,d)
+            The starting points
+        q1 : Tensor (B,d)
+            The ending points
 
-
-def linear_time_scaling_schedule(x: float, max_scaling: float = 5) -> float:
-    """Linear ramp from max_scaling to 1.
-    Results in ()*(n_step + 1) integration steps.
-
-    Params:
-    x : float, current iteration progress (0 to 1)
-    max_scaling : float, maximum scaling factor
-
-    Output:
-    scaling : float, scaling factor
-    """
-    return 1 + (max_scaling - 1) * (1 - x)
-
-
-def cosine_time_scaling_schedule(x: float, max_scaling: float = 5) -> float:
-    """Cosine decay from max_scaling to 1
-
-    Params:
-    x : float, current iteration progress (0 to 1)
-    max_scaling : float, maximum scaling factor
-
-    Output:
-    scaling : float, scaling factor
-    """
-    return 1 + (max_scaling - 1) * (1 + cos(x * 3.1415)) / 2
+        Returns:
+        --------
+        dst : Tensor (B,)
+            The estimated geodesic distance between the points
+        """
+        traj_q = self.get_trajectories(q0, q1)
+        dst = self.compute_distance(traj_q)
+        return dst
 
 
-class GeodesicDistance(torch.nn.Module):
+class GeodesicDistance(GeodesicDistanceSolver):
     """Compute the geodesic distance by shooting and integrating the hamiltonian equations.
     The integration method can be either Euler or Leapfrog.
 
@@ -122,7 +116,7 @@ class GeodesicDistance(torch.nn.Module):
         scale_lr: bool = True,
     ) -> None:
 
-        super().__init__()
+        super().__init__(cometric=g_inv)
 
         self.g_inv = g_inv
         self.dt = dt
@@ -362,28 +356,6 @@ class GeodesicDistance(torch.nn.Module):
         traj_q = torch.stack(traj_q, dim=1)
         return traj_q
 
-    def compute_distance(self, traj_q: Tensor) -> Tensor:
-        """Given the trajectory, computes its length according to the metric
-
-        Params :
-        traj_q : Tensor (b,n_pts,d), points on the trajectories
-
-        Output :
-        distances : Tensor, (b,), distances of the trajectories
-        """
-        traj_front = traj_q[:, 1:, :]
-        traj_back = traj_q[:, :-1, :]
-        segments = traj_front - traj_back
-        midpoints = (traj_front + traj_back) / 2
-
-        distances = torch.stack(
-            [self.g_inv.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
-        )  # Forward per batch, could be slightly faster but whatever
-        distances = torch.einsum("bni,bni->bn", segments, distances)
-        # Add a ReLU to avoid negative distances due to numerical errors
-        distances = distances.relu().sqrt().sum(dim=1)
-        return distances
-
     def exp(self, p0: Tensor, q0: Tensor) -> Tensor:
         """
         Compute the exponential map of the metric.
@@ -449,7 +421,7 @@ class GeodesicDistance(torch.nn.Module):
         return distances
 
 
-class BVP_wrapper(torch.nn.Module):
+class BVP_wrapper(GeodesicDistanceSolver):
     """
     Wrapper class for scipy.integrate.solve_bvp to compute geodesic distances.
     Throughout the code, the position is always given by the fist dim elements of the state.
@@ -595,33 +567,6 @@ class BVP_wrapper(torch.nn.Module):
             traj_q.append(torch.from_numpy(traj))
         return torch.stack(traj_q, dim=0)
 
-    def compute_distance(self, traj_q: Tensor) -> Tensor:
-        """Given the trajectory, computes its length according to the metric
-
-        Params :
-        traj_q : Tensor (b,n_pts,d), points on the trajectories
-
-        Output :
-        distances : Tensor, distances of the trajectories
-        """
-        traj_front = traj_q[:, 1:, :]
-        traj_back = traj_q[:, :-1, :]
-        segments = traj_front - traj_back
-        midpoints = (traj_front + traj_back) / 2
-
-        distances = torch.stack(
-            [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
-        )  # Forward per batch, could be slightly faster but whatever
-        distances = torch.einsum("bni,bni->bn", segments, distances)
-        # Add a ReLU to avoid negative distances due to numerical errors
-        distances = distances.relu().sqrt().sum(dim=1)
-        return distances
-
-    def forward(self, start_pts: Tensor, end_pts: Tensor, init_traj=None) -> Tensor:
-        traj_q = self.get_trajectories(start_pts, end_pts, init_traj)
-        distances = self.compute_distance(traj_q)
-        return distances
-
 
 class BVP_shooting(BVP_wrapper):
     """
@@ -756,64 +701,6 @@ class BVP_shooting(BVP_wrapper):
             self.fun, bc, t, state_init, max_nodes=5 * self.T, verbose=self.verbose
         )
         return state
-
-
-def batched_kro(a: Tensor, b: Tensor) -> Tensor:
-    """
-    Compute the kronecker product between two batch of matrices p and q
-
-    Parameters
-    ----------
-    a : Tensor
-        (batch_size, m,n)
-    b : Tensor
-        (batch_size, p,q)
-
-    Returns
-    -------
-    Tensor
-        (batch_size, m*p, n*q)
-    """
-    kro_prod = torch.einsum("bmn,bpq->bmpnq", a, b)
-    kro_prod = rearrange(kro_prod, "b m p n q -> b (m p) (n q)")
-    return kro_prod
-
-
-def vector_kro(p: Tensor, q: Tensor) -> Tensor:
-    """Compute the kronecker product between two batches of vector p and q
-
-    Parameters
-    ----------
-    p : Tensor
-        (b,m)
-    q : Tensor
-        (b,n)
-
-    Returns
-    -------
-    Tensor
-        (b, m*n)
-    """
-    kro_prod = batched_kro(p.unsqueeze(2), q.unsqueeze(2))
-    kro_prod = kro_prod.squeeze(2)
-    return kro_prod
-
-
-def vec(M: Tensor) -> Tensor:
-    """Stack the columns of M
-
-    Parameters
-    ----------
-    M : Tensor
-        (b,m, n)
-
-    Returns
-    -------
-    Tensor
-        (b, m*n)
-    """
-
-    return rearrange(M, "b m n -> b (m n)")
 
 
 class BVP_ode(BVP_wrapper):
@@ -986,7 +873,7 @@ class BVP_ode(BVP_wrapper):
         return state
 
 
-class SolverGraph(torch.nn.Module):
+class SolverGraph(GeodesicDistanceSolver):
     """Computes the geodesic distances between points using a KNN-graph
 
     Parameters
@@ -1067,7 +954,7 @@ class SolverGraph(torch.nn.Module):
 
         W = 0.5 * (Weight_matrix + Weight_matrix.T)
         return W, knn
-    
+
     def get_similarity_matrix(self, W, sigma=1):
         """Compute the similarity matrix using the weight matrix W
 
@@ -1083,7 +970,7 @@ class SolverGraph(torch.nn.Module):
         S : torch.Tensor (N,N)
             The similarity matrix
         """
-        S = torch.exp(-W / (2 * sigma ** 2))
+        S = torch.exp(-W / (2 * sigma**2))
         return S
 
     def get_predecessors(self) -> torch.Tensor:
@@ -1329,49 +1216,8 @@ class SolverGraph(torch.nn.Module):
         traj_q = torch.from_numpy(traj_q).float()
         return traj_q
 
-    def compute_distance(self, traj_q: Tensor) -> Tensor:
-        """Given the trajectory, computes its length according to the metric
 
-        Params :
-        traj_q : Tensor (b,n_pts,d), points on the trajectories
-
-        Output :
-        distances : Tensor, (b,), distances of the trajectories
-        """
-        traj_front = traj_q[:, 1:, :]
-        traj_back = traj_q[:, :-1, :]
-        segments = traj_front - traj_back
-        midpoints = (traj_front + traj_back) / 2
-
-        distances = torch.stack(
-            [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
-        )  # Forward per batch, could be slightly faster but whatever
-        distances = torch.einsum("bni,bni->bn", segments, distances)
-        # Add a ReLU to avoid negative distances due to numerical errors
-        distances = distances.relu().sqrt().sum(dim=1)
-        return distances
-
-    def forward(self, q0: Tensor, q1: Tensor) -> Tensor:
-        """Given two batch of points q0 and q1, compute the estimated graph geodesic distance between them
-
-        Parameters:
-        -----------
-        q0 : Tensor (B,d)
-            The starting points
-        q1 : Tensor (B,d)
-            The ending points
-
-        Returns:
-        --------
-        dst : Tensor (B,)
-            The estimated geodesic distance between the points
-        """
-        traj_q = self.get_trajectories(q0, q1)
-        dst = self.compute_distance(traj_q)
-        return dst
-
-
-class CascadeSolver(torch.nn.Module):
+class CascadeSolver(GeodesicDistanceSolver):
     def __init__(
         self, cometric: CoMetric, data: Tensor, n_neighbors: int, dt: float, dim: int
     ) -> None:
@@ -1414,34 +1260,15 @@ class CascadeSolver(torch.nn.Module):
         pts_on_traj = torch.stack(traj_q, dim=0)
         return pts_on_traj
 
-    def forward(self, q0: Tensor, q1: Tensor) -> Tensor:
-        """Given two batch of points q0 and q1, compute the estimated graph geodesic distance between them
 
-        Parameters:
-        -----------
-        q0 : Tensor (B,d)
-            The starting points
-        q1 : Tensor (B,d)
-            The ending points
-
-        Returns:
-        --------
-        dst : Tensor (B,)
-            The estimated geodesic distance between the points
-        """
-        traj_q = self.get_trajectories(q0, q1)
-        dst = self.solver.compute_distance(traj_q)
-        return dst
-
-
-def dst_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
+def dst_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistanceSolver) -> Tensor:
     """
     Compute geodesic distances between the points a and b according to the metric g
 
     Params:
     a : Tensor (b, dim) start points
     b : Tensor (b, dim) end points
-    dst_func : GeodesicDistance, function that computes the geodesic distance between two batch of points
+    dst_func : GeodesicDistanceSolver, function that computes the geodesic distance between two batch of points
 
     Output:
     dst : Tensor (b, b) matrix of geodesic distances where dst[i,j] = dst_func(a[i],b[j])
@@ -1463,14 +1290,14 @@ def dst_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
     return dst
 
 
-def angle_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
+def angle_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistanceSolver) -> Tensor:
     """
     Compute geodesic angle between the points a and b according to the metric g
 
     Params:
     a : Tensor (b, dim) start points
     b : Tensor (b, dim) end points
-    dst_func : GeodesicDistance, function that computes the geodesic distance between two batch of points
+    dst_func : GeodesicDistanceSolver, function that computes the geodesic distance between two batch of points
 
     Output:
     dst : Tensor (b, b) matrix of geodesic similarity where dst[i,j] = dst_func.angle(a[i],b[j])
@@ -1492,14 +1319,14 @@ def angle_mat(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
     return dst
 
 
-def dst_mat_naive(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
+def dst_mat_naive(a: Tensor, b: Tensor, dst_func: GeodesicDistanceSolver) -> Tensor:
     """
     Compute geodesic distances between the points a and b according to the metric g
 
     Params:
     a : Tensor (b, dim) start points
     b : Tensor (b, dim) end points
-    dst_func : GeodesicDistance, function that computes the geodesic distance between two batch of points
+    dst_func : GeodesicDistanceSolver, function that computes the geodesic distance between two batch of points
 
     Output:
     dst : Tensor (b, b) matrix of geodesic distances where dst[i,j] = dst_func(a[i],b[j])
@@ -1523,7 +1350,7 @@ def dst_mat_naive(a: Tensor, b: Tensor, dst_func: GeodesicDistance) -> Tensor:
 def dst_mat_vectorized(
     a: Tensor,
     b: Tensor,
-    dst_func: GeodesicDistance,
+    dst_func: GeodesicDistanceSolver,
 ) -> Tensor:
     """
     Compute geodesic distances between points a and b efficiently.
@@ -1537,7 +1364,7 @@ def dst_mat_vectorized(
     Params:
     a : Tensor (b, dim) start points
     b : Tensor (b, dim) end points
-    dst_func : GeodesicDistance, function that computes geodesic distances
+    dst_func : GeodesicDistanceSolver, function that computes geodesic distances
 
     Output:
     dst : Tensor (b, b) matrix of geodesic distances where dst[i,j] = dst_func(a[i],b[j])
