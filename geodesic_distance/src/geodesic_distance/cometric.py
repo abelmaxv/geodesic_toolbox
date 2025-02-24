@@ -57,7 +57,7 @@ class CoMetric(torch.nn.Module):
         id : Tensor (b,d,d) batch of identity matrices
         """
         B, dim = x.shape
-        id = torch.eye(dim, dtype=x.dtype,device=x.device).unsqueeze(0)
+        id = torch.eye(dim, dtype=x.dtype, device=x.device).unsqueeze(0)
         id = id.expand(B, -1, -1)
         return id
 
@@ -126,20 +126,18 @@ class FunctionnalHeightMapCometric(CoMetric):
         super().__init__()
         self.func = func
         self.reg = reg
+        self.df_ = torch.func.jacrev(self.func, argnums=(0, 1))
+
+    def get_dx_dy(self, x: torch.Tensor, y: torch.Tensor):
+        dx, dy = self.df_(x, y)
+        dx = dx.sum(dim=1)
+        dy = dy.sum(dim=1)
+        return dx, dy
 
     def metric(self, q):
         x, y = q.T
-        x = x.requires_grad_()
-        y = y.requires_grad_()
+        df_dx, df_dy = self.get_dx_dy(x, y)
 
-        with torch.enable_grad():
-            df_dx, df_dy = torch.autograd.grad(
-                self.func(x, y).sum(),
-                [x, y],
-                create_graph=True,
-                allow_unused=True,
-                materialize_grads=True,
-            )
         # Compute the metric tensor g_ij = <d_i r, d_j r> ( r=(x,y,f(x,y)) )
         g = torch.zeros(x.shape[0], 2, 2, device=x.device, dtype=x.dtype)
         g[:, 0, 0] = 1 + df_dx**2
@@ -501,7 +499,7 @@ class LiftedCometric(CoMetric):
         self.base_cometric = base_cometric
         self.h = h
         self.beta = beta
-        
+
         grad_ = torch.func.jacrev(self.h)
         self.grad_h = lambda x: torch.einsum("bBd->bd", grad_(x))[:, :, None]
 

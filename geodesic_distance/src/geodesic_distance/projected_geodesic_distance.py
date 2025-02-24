@@ -1,9 +1,9 @@
 from torch import Tensor
-from geodesic_distance import GeodesicDistance, CoMetric, IdentityCoMetric, hamiltonian
+from geodesic_distance import ShootingSolver, CoMetric, IdentityCoMetric, hamiltonian
 from typing import Callable
 
 
-class ProjectedGeodesicDistance(GeodesicDistance):
+class ProjectedGeodesicDistance(ShootingSolver):
     """Compute the geodesic distance by shooting and integrating the hamiltonian equations.
     The integration method can be either Euler or Leapfrog.
 

@@ -24,7 +24,7 @@ from .utils import (
 from tqdm import tqdm
 
 
-class GeodesicDistanceSolver(torch.nn.module):
+class GeodesicDistanceSolver(torch.nn.Module):
     """Base class for geodesic distance solvers."""
 
     def __init__(self, cometric: CoMetric = IdentityCoMetric()):
@@ -148,7 +148,7 @@ class ShootingSolver(GeodesicDistanceSolver):
         self.dH_ = torch.func.jacrev(lambda p, q: self.H(p, q).sum(), argnums=(0, 1))
 
     def get_dp_dq(self, p: Tensor, q: Tensor) -> tuple[Tensor, Tensor]:
-        """ 
+        """
         Computes the partial derivatives of the Hamiltonian w.r.t. p and q.
 
         Params:
@@ -161,8 +161,8 @@ class ShootingSolver(GeodesicDistanceSolver):
         """
         dH_dp, dH_dq = self.dH_(p, q)
         return dH_dp, dH_dq
-        
-    def H(self,p: Tensor, q: Tensor) -> Tensor:
+
+    def H(self, p: Tensor, q: Tensor) -> Tensor:
         """
         Computes the Hamiltonian at point q for momentum p.
 
@@ -585,7 +585,7 @@ class BVP_wrapper(GeodesicDistanceSolver):
         for b in range(start_pts.shape[0]):
             init_traj_b = init_traj[b] if init_traj is not None else None
             state = self.solve_equation(start_pts[b], end_pts[b], init_traj_b)
-            if state.status != 0:
+            if state.status != 0 and self.verbose > 0:
                 print(f"Failed to solve BVP for batch {b}. Got\n{state}")
             traj = state.sol(t)[: self.dim].T
             traj_q.append(torch.from_numpy(traj))
@@ -749,7 +749,7 @@ class BVP_ode(BVP_wrapper):
         if hasattr(self.cometric, "jacobian"):
             self.get_dVecM = lambda gamma: self.cometric.jacobian(gamma.squeeze(2))
         else:
-            self.get_dVecM = self.compute_dVecM
+            self.get_dVecM = self.compute_dVecM()
 
     def compute_dVecM(self) -> Callable:
         """
@@ -757,7 +757,7 @@ class BVP_ode(BVP_wrapper):
         """
         eval_VecM = lambda gamma: vec(self.cometric.metric(gamma.squeeze(2)))
         jac_ = torch.func.jacrev(eval_VecM)
-        dVecM = lambda gamma: torch.einsum("b D B d -> b D d", jac_(gamma))
+        dVecM = lambda gamma: torch.einsum("b D B d i -> b D d i", jac_(gamma))
         return dVecM
 
     def geodesic_equation(self, gamma: Tensor, gamma_dot: Tensor) -> Tensor:
@@ -779,7 +779,7 @@ class BVP_ode(BVP_wrapper):
         kro_gammadot = batched_kro(gamma_dot, gamma_dot)
 
         M_inv = self.cometric(gamma.squeeze(2))
-        dVecM = self.get_dVecM(gamma)
+        dVecM = self.get_dVecM(gamma).squeeze(-1)
 
         a = 2 * kro_gammadot_id @ dVecM @ gamma_dot
         b = dVecM.mT @ kro_gammadot
