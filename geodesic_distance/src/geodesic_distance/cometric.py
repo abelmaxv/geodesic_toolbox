@@ -489,7 +489,7 @@ class LiftedCometric(CoMetric):
     base_cometric: CoMetric
         The original metric tensor
     h: torch.nn.Module
-        The function to condition the metric
+        The function to condition the metric. It should have a signature (Batch, Dim) -> (Batch,1)
     beta: float
         The scaling factor for the conditioning
     """
@@ -500,8 +500,8 @@ class LiftedCometric(CoMetric):
         self.h = h
         self.beta = beta
 
-        grad_ = torch.func.jacrev(self.h)
-        self.grad_h = lambda x: torch.einsum("bBd->bd", grad_(x))[:, :, None]
+        grad_h_ = torch.func.jacrev(self.h)
+        self.grad_h = lambda x: torch.einsum("bibj->bij", grad_h_(x))
 
     def metric(self, q: torch.Tensor):
         g_base = self.base_cometric.metric(q)
