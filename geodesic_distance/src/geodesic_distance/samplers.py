@@ -1,0 +1,952 @@
+import torch
+from torch import nn
+from tqdm import tqdm
+from torch import Tensor
+from torch.linalg import LinAlgError as _LinAlgError
+
+from .cometric import CoMetric
+
+class Sampler(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def sample(self, z_0: Tensor) -> Tensor:
+        """
+        Given an initial sample z_0, it returns a new sample from the target distribution.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial sample.
+
+        Returns
+        -------
+        Tensor (b,d)
+            The new samples.
+        """
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def forward(self, z_0: Tensor, n: int) -> Tensor:
+        """
+        Given initial samples z_0, it returns n new samples for each initial sample.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial samples.
+        n : int
+            The number of samples to generate for each initial sample.
+
+        Returns
+        -------
+        Tensor (b,n,d)
+            The new samples.
+        """
+        new_samples = []
+
+        # If the batch_size is bigger then the number of samples to generate
+        # We process the sampling batch-wise, otherwise we process the sampling
+        # sample-wise.
+        if z_0.shape[0] > n:
+            pbar = tqdm(range(n)) if self.pbar else range(n)
+            for k in pbar:
+                new_samples.append(self.sample(z_0))
+            return torch.stack(new_samples, dim=1)
+
+        else:
+            pbar = tqdm(range(z_0.shape[0])) if self.pbar else range(z_0.shape[0])
+            for k in pbar:
+                z_batch = z_0[k].repeat(n, 1)
+                new_samples.append(self.sample(z_batch))
+            return torch.stack(new_samples, dim=0)
+
+
+class ConditionnalSampler(Sampler):
+    def __init__(self):
+        super().__init__()
+
+    def sample(self, z_0: Tensor) -> Tensor:
+        """
+        Given an initial sample z_0, it returns a new sample from the target distribution.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial sample.
+
+        Returns
+        -------
+        x : Tensor (b,d)
+            The new samples.
+        y : Tensor (b,)
+            The class of the samples.
+        """
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def forward(self, z_0: Tensor, n: int) -> tuple[Tensor, Tensor]:
+        """
+        Given initial samples z_0, it returns n new samples for each initial sample.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial samples.
+        n : int
+            The number of samples to generate for each initial sample.
+
+        Returns
+        -------
+        x : Tensor (b,n,d)
+            The new samples.
+        y : Tensor (b,n,)
+            The class of the samples.
+        """
+        new_samples = []
+        new_classes = []
+
+        # If the batch_size is bigger then the number of samples to generate
+        # We process the sampling batch-wise, otherwise we process the sampling
+        # sample-wise.
+        if z_0.shape[0] > n:
+            pbar = tqdm(range(n)) if self.pbar else range(n)
+            for k in pbar:
+                x, y = self.sample(z_0)
+                new_samples.append(x)
+                new_classes.append(y)
+            new_classes = torch.stack(new_classes, dim=1)
+            new_samples = torch.stack(new_samples, dim=1)
+            return new_samples, new_classes
+
+        else:
+            pbar = tqdm(range(z_0.shape[0])) if self.pbar else range(z_0.shape[0])
+            for k in pbar:
+                z_batch = z_0[k].repeat(n, 1)
+                x, y = self.sample(z_batch)
+                new_samples.append(x)
+                new_classes.append(y)
+            new_classes = torch.stack(new_classes, dim=0)
+            new_samples = torch.stack(new_samples, dim=0)
+            return new_samples, new_classes
+
+
+class ConstantClassSampler(ConditionnalSampler):
+    def __init__(self, sampler: Sampler, y: int):
+        super().__init__()
+        self.sampler = sampler
+        self.y = y
+
+    def sample(self, z_0: Tensor) -> tuple[Tensor, Tensor]:
+        x = self.sampler.sample(z_0)
+        y = torch.full((z_0.shape[0],), self.y, dtype=torch.long,device=z_0.device)
+        return x, y
+
+
+class MixtureOfSamplers(nn.Module):
+    def __init__(self, samplers: list[Sampler]):
+        super().__init__()
+        self.samplers = samplers
+        self.n_samplers = len(samplers)
+
+    def __iter__(self):
+        yield from self.samplers
+
+    def forward(self, z_0: Tensor, n: int) -> tuple[Tensor, Tensor]:
+        """
+        Samples n new samples from the mixture of samplers.
+        Each sampler is used n//n_samplers times.
+        If n is not divisible by n_samplers, the remaining samples are sampled from a random sampler.
+
+        Parameters
+        ----------
+        n : int
+            Number of samples to generate
+        z_0 : Tensor (b, d)
+            The initial samples.
+
+        Returns
+        -------
+        x : Tensor (b, n, ...)
+            The samples generated
+        """
+
+        x = []
+
+        for i in range(self.n_samplers):
+            n_i = n // self.n_samplers
+            x_i = self.samplers[i](z_0, n_i)
+            x.append(x_i)
+
+        # If n%self.n_samplers != 0, we need to sample the remaining samples
+        # Just take a random sampler and sample the remaining samples
+        if n % self.n_samplers != 0:
+            i = torch.randint(0, self.n_samplers, (1,)).item()
+            n_i = n % self.n_samplers
+            x_i = self.samplers[i](z_0, n_i)
+            x.append(x_i)
+
+        x = torch.cat(x, dim=1)
+
+        return x
+
+
+class MixtureOfCondtionnalSamplers(nn.Module):
+    def __init__(self, samplers: list[ConditionnalSampler]):
+        super().__init__()
+        self.samplers = samplers
+        self.n_samplers = len(samplers)
+
+    def forward(self, z_0: Tensor, n: int) -> tuple[Tensor, Tensor]:
+        """
+        Samples n new samples from the mixture of samplers.
+        Each sampler is used n//n_samplers times.
+        If n is not divisible by n_samplers, the remaining samples are sampled from a random sampler
+
+        Parameters
+        ----------
+        n : int
+            Number of samples to generate
+        z_0 : Tensor (b, d)
+            The initial samples.
+
+        Returns
+        -------
+        x : Tensor (b, n, ...)
+            The samples generated
+        y : Tensor (b, n,)
+            The class of the samples
+        """
+
+        x, y = [], []
+
+        for i in range(self.n_samplers):
+            n_i = n // self.n_samplers
+            x_i, y_i = self.samplers[i](z_0, n_i)
+            x.append(x_i)
+            y.append(y_i)
+
+        # If n%self.n_samplers != 0, we need to sample the remaining samples
+        # Just take a random sampler and sample the remaining samples
+        if n % self.n_samplers != 0:
+            i = torch.randint(0, self.n_samplers, (1,)).item()
+            n_i = n % self.n_samplers
+            x_i, y_i = self.samplers[i](z_0, n_i)
+            x.append(x_i)
+            y.append(y_i)
+
+        x = torch.cat(x, dim=1)
+        y = torch.cat(y, dim=1)
+
+        return x, y
+
+
+class HMCSampler(Sampler):
+    """
+    Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
+    It uses the leapfrog integratorto propose new samples from the target distribution.
+    It uses a tempering scheme on the momentum.
+    Here the target distribution is defined by the volume element of the cometric.
+    But this class is easily heritable to define other target distributions. Just redefine
+    the p_target method.
+
+    Parameters
+    ----------
+    cometric : CoMetric
+        The cometric that defines the target distribution.
+    l : int
+        The number of leapfrog steps.
+    gamma : float
+        The step size.
+    N_run : int
+        The number of iterations.
+    bounds : float
+        The bounds of the target distribution. This is because the distribution must be supported on a bounded set.
+    beta_0 : float
+        The initial temperature for the tempering of the momentum.
+    pbar : bool
+        If True, it shows a progress bar.
+    """
+
+    def __init__(
+        self,
+        cometric: CoMetric,
+        l: int,
+        gamma: float,
+        N_run: int,
+        bounds: float = 1e3,
+        beta_0: float = 1,
+        pbar: bool = False,
+    ):
+        super().__init__()
+        self.cometric = cometric
+        self.l = l
+        self.gamma = gamma
+        self.N_run = N_run
+        self.bounds = bounds
+        self.beta_0_sqrt = beta_0**0.5
+        self.pbar = pbar
+
+        self._grad_U = torch.func.jacrev(self.U)
+        self.grad_U = lambda z: self._grad_U(z).sum(1)
+
+    def p_target(self, z: Tensor) -> Tensor:
+        p = self.cometric(z).det().abs().sqrt()
+        return p
+
+    def U(self, z: Tensor) -> Tensor:
+        return -torch.log(self.p_target(z))
+
+    def K(self, v: Tensor) -> Tensor:
+        return torch.einsum("bi,bj->b", v, v)  # v^T @ v
+
+    def H(self, z: Tensor, v: Tensor) -> Tensor:
+        return self.U(z) + self.K(v)
+
+    def leapfrog_step(self, z: Tensor, v: Tensor) -> Tensor:
+        v_half = v - self.gamma / 2 * self.grad_U(z)
+        z_new = z + self.gamma * v_half
+        v_new = v_half - self.gamma / 2 * self.grad_U(z_new)
+
+        # if torch.isnan(z_new).any() or torch.isnan(v_new).any():
+        #     print(f"{z_new=}, {v_new=}")
+        #     print(f"{z=}, {v=}")
+        #     print(f"{self.grad_U(z)=}")
+        #     print(f"{self.grad_U(z_new)=}")
+        #     raise _LinAlgError("NaN values in the leapfrog step.")
+
+        return z_new, v_new
+
+    def tempering(self, k):
+        beta_k = ((1 - 1 / self.beta_0_sqrt) * (k / self.N_run) ** 2) + 1 / self.beta_0_sqrt
+        return beta_k
+
+    def proposal_rate(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
+        alpha = torch.exp(-self.H(z_new, v_new) + self.H(z, v))
+        return torch.min(torch.ones_like(alpha), alpha)
+
+    def get_alpha(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
+        """Compute the proposal rates. If the new sample is out of bounds, the proposal rate is 0."""
+        alpha = self.proposal_rate(z, v, z_new, v_new)
+        z_norm = torch.linalg.norm(z_new, dim=-1)
+        out_of_bounds = z_norm > self.bounds
+        alpha[out_of_bounds] = 0
+        return alpha
+
+    def leapfrog(self, z: Tensor, v: Tensor) -> Tensor:
+        z_new, v_new = z.clone(), v.clone()
+        beta_k_minus_1_sqrt = self.beta_0_sqrt
+        for k in range(self.l):
+            z_new, v_new = self.leapfrog_step(z_new, v_new)
+            beta_k_sqrt = self.tempering(k)
+            v_new = (beta_k_minus_1_sqrt / beta_k_sqrt) * v_new
+            beta_k_minus_1_sqrt = beta_k_sqrt
+        return z_new, v_new
+
+    def sample(self, z_0: Tensor, return_traj=False) -> Tensor:
+        """
+        Given an initial sample z_0, it returns a new sample from the target distribution.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial sample.
+        return_traj : bool
+            If True, it returns the trajectory of the samples.
+
+        Returns
+        -------
+        Tensor (b,d)
+            The new samples.
+        or
+        Tensor (b,N_run,d)
+            The trajectory of the samples. The initial sample is the first element.
+        """
+
+        z = z_0.clone()
+
+        if return_traj:
+            traj = [z.clone()]
+
+        for k in range(self.N_run):
+            v_0 = torch.randn_like(z)
+            try:
+                z_l, v_l = self.leapfrog(z, v_0)
+                alpha = self.get_alpha(z, v_0, z_l, v_l)
+            except _LinAlgError:
+                # @TODO: Handle this error properly.
+                # Not the best way to handle this error.
+                # Because a single LinAlgError for a given sample
+                # will stop the whole process even for other valid samples.
+                alpha = torch.zeros(z.shape[0])
+
+            u = torch.rand_like(alpha)
+            mask = alpha >= u
+
+            z = torch.where(mask[:, None], z_l, z)
+
+            if return_traj:
+                traj.append(z.clone())
+
+        if return_traj:
+            return torch.stack(traj, dim=1)
+        else:
+            return z
+
+
+class MMALA(Sampler):
+    """
+    Manifold Metropolis-Adjusted Langevin Algorithm Sampler from
+
+    `Riemann manifold Langevin and Hamiltonian Monte Carlo methods` by Girolami and Calderhead 2011.
+
+    Parameters
+    ----------
+    cometric : CoMetric
+        The cometric to use.
+    l : int
+        The number of integration steps between each proposal.
+    gamma : float
+        The step size.
+    N_run : int
+        The number of proposal steps to run.
+    bounds : float
+        The bounds of the manifold.
+    pbar : bool
+        Whether to display a progress bar or not.
+    """
+
+    def __init__(
+        self,
+        cometric: CoMetric,
+        l: int,
+        gamma: float,
+        N_run: int,
+        bounds: float,
+        pbar: bool = False,
+    ) -> None:
+        super().__init__()
+        self.cometric = cometric
+        self.l = l
+        self.gamma = gamma
+        self.N_run = N_run
+        self.bounds = bounds
+        self.pbar = pbar
+
+        self._grad_U = torch.func.jacrev(self.U)
+        self.grad_U = lambda z: self._grad_U(z).sum(1)
+
+    def p_target(self, z: Tensor) -> Tensor:
+        p = self.cometric(z).det().sqrt()
+        return p
+
+    def U(self, z: Tensor) -> Tensor:
+        return -torch.log(self.p_target(z))
+
+    def K(self, v: Tensor) -> Tensor:
+        g_inv = self.cometric(v)
+        det_g = 1 / g_inv.det()
+        velocity = torch.einsum("bi,bij,bj->b", v, g_inv, v)
+        return 0.5 * velocity + 0.5 * torch.log(det_g)
+
+    def H(self, z: Tensor) -> Tensor:
+        return self.U(z) + self.K(z)
+
+    def sqrtmh(self, A):
+        """
+        Compute the square root of a Symmetric or Hermitian positive definite matrix or batch of matrices
+
+        See : https://github.com/pytorch/pytorch/issues/25481#issuecomment-1109537907
+
+        Parameters
+        ----------
+        A : Tensor (..., n, n)
+            The matrix to compute the square root of.
+
+        Returns
+        -------
+        Tensor (..., n, n)
+            The square root of the matrix.
+        """
+        L, Q = torch.linalg.eigh(A)
+        zero = torch.zeros((), device=L.device, dtype=L.dtype)
+        threshold = L.max(-1).values * L.size(-1) * torch.finfo(L.dtype).eps
+        L = L.where(L > threshold.unsqueeze(-1), zero)  # zero out small components
+        return (Q * L.sqrt().unsqueeze(-2)) @ Q.mH
+
+    def proposal(self, x: Tensor) -> Tensor:
+        """Proposal of `Riemann manifold Langevin and Hamiltonian Monte Carlo methods` p8.
+        in the case of constant curvature manifolds."""
+        g_inv = self.cometric(x)
+        dU = self.grad_U(x)[:, :, None]
+        z = torch.randn_like(x)[:, :, None]
+        z = self.gamma * torch.bmm(self.sqrtmh(g_inv), z).squeeze(2)
+        x_new = x + z + self.gamma**2 / 2 * torch.bmm(g_inv, dU).squeeze(2)
+        return x_new
+
+    def proposal_rate(self, z: Tensor, z_new: Tensor) -> Tensor:
+        alpha = torch.exp(-self.H(z_new) + self.H(z))
+        return torch.min(torch.ones_like(alpha), alpha)
+
+    def get_alpha(self, z: Tensor, z_new: Tensor) -> Tensor:
+        """Compute the proposal rates. If the new sample is out of bounds, the proposal rate is 0."""
+        alpha = self.proposal_rate(z, z_new)
+        z_norm = torch.linalg.norm(z_new, dim=-1)
+        out_of_bounds = z_norm > self.bounds
+        alpha[out_of_bounds] = 0
+        return alpha
+
+    def run(self, z: Tensor) -> Tensor:
+        z_new = z.clone()
+        for k in range(self.l):
+            z_new = self.proposal(z_new)
+        return z_new
+
+    def sample(self, z_0: Tensor, return_traj=False) -> Tensor:
+        z = z_0.clone()
+
+        if return_traj:
+            traj = [z.clone()]
+
+        for k in range(self.N_run):
+            z_l = self.run(z)
+            alpha = self.get_alpha(z, z_l)
+
+            u = torch.rand_like(alpha)
+            mask = alpha >= u
+            z = torch.where(mask[:, None], z_l, z)
+
+            if return_traj:
+                traj.append(z.clone())
+
+        if return_traj:
+            return torch.stack(traj, dim=1)
+        else:
+            return z
+
+
+class ImplicitRHMCSampler(Sampler):
+    """
+    Riemannian Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
+    It uses the leapfrog integratorto propose new samples from the target distribution.
+    It uses a tempering scheme on the momentum.
+    Here the target distribution is defined by the volume element of the cometric.
+    But this class is easily heritable to define other target distributions. Just redefine
+    the p_target method.
+
+    Parameters
+    ----------
+    cometric : CoMetric
+        The cometric that defines the target distribution.
+    l : int
+        The number of leapfrog steps.
+    N_fx : int
+        The number of fixed point iterations.
+    gamma : float
+        The step size.
+    N_run : int
+        The number of iterations.
+    bounds : float
+        The bounds of the target distribution. This is because the distribution must be supported on a bounded set.
+    beta_0 : float
+        The initial temperature for the tempering of the momentum.
+    pbar : bool
+        If True, it shows a progress bar.
+    """
+
+    def __init__(
+        self,
+        cometric: CoMetric,
+        l: int,
+        N_fx: int,
+        gamma: float,
+        N_run: int,
+        bounds: float = 1e3,
+        beta_0: float = 1,
+        pbar: bool = False,
+    ):
+        super().__init__()
+        self.cometric = cometric
+        self.l = l
+        self.N_fx = N_fx
+        self.gamma = gamma
+        self.N_run = N_run
+        self.bounds = bounds
+        self.beta_0_sqrt = beta_0**0.5
+        self.pbar = pbar
+
+        self._grad_U = torch.func.jacrev(self.U)
+        self._dH_dz_ = torch.func.jacrev(self.H, argnums=0)
+        self._dH_dv = torch.func.jacrev(self.H, argnums=1)
+
+        self.grad_U = lambda z: self._grad_U(z).sum(1)
+        self.dH_dz = lambda z, v: self._dH_dz_(z, v).sum(1)
+        self.dH_dv = lambda z, v: self._dH_dv(z, v).sum(1)
+
+    def p_target(self, z: Tensor) -> Tensor:
+        p = self.cometric(z).det().abs().sqrt()
+        return p
+
+    def U(self, z: Tensor) -> Tensor:
+        return -torch.log(self.p_target(z))
+
+    def K(self, v: Tensor) -> Tensor:
+        g_inv = self.cometric(v)
+        det_g = 1 / g_inv.det().abs()
+        velocity = torch.einsum("bi,bij,bj->b", v, g_inv, v)
+        return 0.5 * velocity + 0.5 * torch.log(det_g)
+
+    def H(self, z: Tensor, v: Tensor) -> Tensor:
+        return self.U(z) + self.K(v)
+
+    def get_v_half(self, z: Tensor, v: Tensor) -> Tensor:
+        """
+        Solves the fixed point equation for the velocity.
+        v_half = v - gamma/2 * dH_dz(z, v_half)
+        """
+        v_half = v.clone()
+        for k in range(self.N_fx):
+            v_half = v_half - self.gamma * self.dH_dz(z, v_half) / 2
+        return v_half
+
+    def get_z_new(self, z: Tensor, v_half: Tensor) -> Tensor:
+        """
+        Solves the fixed point equation for the position.
+        z_new = z + gamma/2 * ( dH_dv(z, v_half) + dH_dv(z_new,v_half) )
+        """
+        z_new = z.clone()
+        for k in range(self.N_fx):
+            z_new = (
+                z_new + self.gamma * (self.dH_dv(z, v_half) + self.dH_dv(z_new, v_half)) / 2
+            )
+        return z_new
+
+    def leapfrog_step(self, z: Tensor, v: Tensor) -> Tensor:
+        v_half = self.get_v_half(z, v)
+        z_new = self.get_z_new(z, v_half)
+        v_new = v_half - self.gamma * self.dH_dz(z_new, v_half) / 2
+        return z_new, v_new
+
+    def tempering(self, k):
+        beta_k = ((1 - 1 / self.beta_0_sqrt) * (k / self.N_run) ** 2) + 1 / self.beta_0_sqrt
+        return beta_k
+
+    def proposal_rate(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
+        alpha = torch.exp(-self.H(z_new, v_new) + self.H(z, v))
+        return torch.min(torch.ones_like(alpha), alpha)
+
+    def get_alpha(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
+        """Compute the proposal rates. If the new sample is out of bounds, the proposal rate is 0."""
+        alpha = self.proposal_rate(z, v, z_new, v_new)
+        z_norm = torch.linalg.norm(z_new, dim=-1)
+        out_of_bounds = z_norm > self.bounds
+        alpha[out_of_bounds] = 0
+        return alpha
+
+    def leapfrog(self, z: Tensor, v: Tensor) -> Tensor:
+        z_new, v_new = z.clone(), v.clone()
+        beta_k_minus_1_sqrt = self.beta_0_sqrt
+        for k in range(self.l):
+            z_new, v_new = self.leapfrog_step(z_new, v_new)
+            beta_k_sqrt = self.tempering(k)
+            v_new = (beta_k_minus_1_sqrt / beta_k_sqrt) * v_new
+            beta_k_minus_1_sqrt = beta_k_sqrt
+        return z_new, v_new
+
+    def sample(self, z_0: Tensor, return_traj=False) -> Tensor:
+        """
+        Given an initial sample z_0, it returns a new sample from the target distribution.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial sample.
+        return_traj : bool
+            If True, it returns the trajectory of the samples.
+
+        Returns
+        -------
+        Tensor (b,d)
+            The new samples.
+        or
+        Tensor (b,N_run,d)
+            The trajectory of the samples. The initial sample is the first element.
+        """
+
+        z = z_0.clone()
+
+        if return_traj:
+            traj = [z.clone()]
+
+        for k in range(self.N_run):
+            v_0 = torch.randn_like(z)
+
+            z_l, v_l = self.leapfrog(z, v_0)
+            alpha = self.get_alpha(z, v_0, z_l, v_l)
+
+            u = torch.rand_like(alpha)
+            mask = alpha >= u
+
+            z = torch.where(mask[:, None], z_l, z)
+
+            if return_traj:
+                traj.append(z.clone())
+
+        if return_traj:
+            return torch.stack(traj, dim=1)
+        else:
+            return z
+
+
+def SoftAbs(M, alpha=1e3):
+    """
+    SoftAbs regularisation of a matrix M. It is used to ensure that the matrix is positive definite.
+    This is especially useful when using the Fisher information matrix.
+    Essentially, it is a soft version of the absolute value.
+
+    To use around a sampler, just wrap your cometric in a SoftAbs :
+    ```
+    cometric = IdentityCoMetric()
+    cometric = lambda x: SoftAbs(cometric(x))
+    ```
+
+    It is defined as:
+    SoftAbs(M) = Q @ Diag(a_i * coth(alpha * a_i)) @ Q^T
+    where M = Q @ Diag(a_i) @ Q^T is the eigendecomposition of M.
+
+    Parameters
+    ----------
+    M : Tensor (..., n, n)
+        The matrix to regularise.
+    alpha : float
+        The regularisation parameter.
+
+    Returns
+    -------
+    Tensor (..., n, n)
+        The regularised matrix.
+    """
+    D, Q = torch.linalg.eigh(M)
+    D = D * 1 / torch.tanh(alpha * D)
+    G = torch.bmm(torch.diag_embed(D), Q.mH)
+    G = torch.bmm(Q, G)
+    return G
+
+
+class ExplicitRHMCSampler(Sampler):
+    """
+    Explicit Riemannian Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
+    It uses the augmented leapfrog integrator to propose new samples from the target distribution.
+    It uses a tempering scheme on the momentum.
+    Here the target distribution is defined by the volume element of the cometric.
+    But this class is easily heritable to define other target distributions. Just redefine
+    the p_target method.
+
+    Parameters
+    ----------
+    cometric : CoMetric
+        The cometric that defines the target distribution.
+    l : int
+        The number of leapfrog steps.
+    gamma : float
+        The step size.
+    omega : float
+        The binding parameter
+    N_run : int
+        The number of iterations.
+    bounds : float
+        The bounds of the target distribution. This is because the distribution must be supported on a bounded set.
+    beta_0 : float
+        The initial temperature for the tempering of the momentum.
+    pbar : bool
+        If True, it shows a progress bar.
+    """
+
+    def __init__(
+        self,
+        cometric: CoMetric,
+        l: int,
+        gamma: float,
+        omega: float,
+        N_run: int,
+        bounds: float = 1e3,
+        beta_0: float = 1,
+        pbar: bool = False,
+    ):
+        super().__init__()
+        self.cometric = cometric
+        self.l = l
+        self.gamma = gamma
+        self.omega = omega
+        self.N_run = N_run
+        self.bounds = bounds
+        self.beta_0_sqrt = beta_0**0.5
+        self.pbar = pbar
+
+        c = torch.Tensor([2 * self.omega * self.gamma]).cos()
+        s = torch.Tensor([2 * self.omega * self.gamma]).sin()
+        self.register_buffer("c", c)
+        self.register_buffer("s", s)
+
+        self._dH_dz_ = torch.func.jacrev(self.H_base, argnums=0)
+        self._dH_dv = torch.func.jacrev(self.H_base, argnums=1)
+        self.dH_dz = lambda z, v: self._dH_dz_(z, v).sum(1)
+        self.dH_dv = lambda z, v: self._dH_dv(z, v).sum(1)
+
+    def p_target(self, z: Tensor) -> Tensor:
+        p = self.cometric(z).det().abs().sqrt()
+        return p
+
+    def U(self, z: Tensor) -> Tensor:
+        return -torch.log(self.p_target(z))
+
+    def K(self, v: Tensor) -> Tensor:
+        g_inv = self.cometric(v)
+        det_g = 1 / g_inv.det().abs()
+        velocity = torch.einsum("bi,bij,bj->b", v, g_inv, v)
+        return 0.5 * velocity + 0.5 * torch.log(det_g)
+
+    def H_base(self, z: Tensor, v: Tensor) -> Tensor:
+        return self.U(z) + self.K(v)
+
+    def binding(self, z_0: Tensor, v_0: Tensor, z_1: Tensor, v_1: Tensor) -> Tensor:
+        h = torch.linalg.vector_norm(z_1 - z_0, dim=-1) ** 2 / 2
+        h += torch.linalg.vector_norm(v_1 - v_0, dim=-1) ** 2 / 2
+        return h
+
+    def H(self, z_0: Tensor, v_0: Tensor, z_1: Tensor, v_1: Tensor) -> Tensor:
+        H_0 = self.H_base(z_0, v_0)
+        H_1 = self.H_base(z_1, v_1)
+        H = H_0 + H_1 + self.omega * self.binding(z_0, v_0, z_1, v_1)
+        return H
+
+    def leapfrog_step(
+        self, z_0: Tensor, v_0: Tensor, z_1: Tensor, v_1: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """
+        Leapfrog step for the augmented Hamiltonian.
+        Pseudo code in `Introducing an Explicit Symplectic Integration Scheme for Riemannian Manifold Hamiltonian Monte Carlo`
+        by Cobb et Baydin et al (2019).
+        """
+        v_0_new = v_0 - self.gamma / 2 * self.dH_dz(z_0, v_1)
+        z_1_new = z_1 + self.gamma / 2 * self.dH_dv(z_0, v_1)
+        v_1_new = v_1 - self.gamma / 2 * self.dH_dz(z_1_new, v_0)
+        z_0_new = z_0 + self.gamma / 2 * self.dH_dv(z_1_new, v_0)
+
+        z_0_new = (
+            z_0_new + z_1_new + self.c * (z_0_new - z_1_new) + self.s * (v_0_new - v_1_new)
+        ) / 2
+        v_0_new = (
+            v_0_new + v_1_new - self.s * (z_0_new - z_1_new) + self.c * (v_0_new - v_1_new)
+        ) / 2
+        z_1_new = (
+            z_0_new + z_1_new - self.c * (z_0_new - z_1_new) - self.s * (v_0_new - v_1_new)
+        ) / 2
+        v_1_new = (
+            v_0_new + v_1_new + self.s * (z_0_new - z_1_new) - self.c * (v_0_new - v_1_new)
+        ) / 2
+
+        v_1_new = v_1_new - self.gamma / 2 * self.dH_dz(z_1_new, v_0_new)
+        z_0_new = z_0_new + self.gamma / 2 * self.dH_dv(z_1_new, v_0_new)
+        v_0_new = v_0_new - self.gamma / 2 * self.dH_dz(z_0_new, v_1_new)
+        z_1_new = z_1_new + self.gamma / 2 * self.dH_dv(z_0_new, v_1_new)
+
+        return z_0_new, v_0_new, z_1_new, v_1_new
+
+    def tempering(self, k):
+        beta_k = ((1 - 1 / self.beta_0_sqrt) * (k / self.N_run) ** 2) + 1 / self.beta_0_sqrt
+        return beta_k
+
+    def proposal_rate(
+        self,
+        z_l_0: Tensor,
+        v_l_0: Tensor,
+        z_l_1: Tensor,
+        v_l_1: Tensor,
+        z_0: Tensor,
+        v0: Tensor,
+        z_1: Tensor,
+        v1: Tensor,
+    ) -> Tensor:
+        H_new = self.H(z_l_0, v_l_0, z_l_1, v_l_1)
+        H_old = self.H(z_0, v0, z_1, v1)
+        alpha = torch.exp(-H_new + H_old)
+        return torch.min(torch.ones_like(alpha), alpha)
+
+    def get_alpha(
+        self,
+        z_l_0: Tensor,
+        v_l_0: Tensor,
+        z_l_1: Tensor,
+        v_l_1: Tensor,
+        z_0: Tensor,
+        v0: Tensor,
+        z_1: Tensor,
+        v1: Tensor,
+    ) -> Tensor:
+        """Compute the proposal rates. If the new sample is out of bounds, the proposal rate is 0."""
+        alpha = self.proposal_rate(z_l_0, v_l_0, z_l_1, v_l_1, z_0, v0, z_1, v1)
+        z_0_norm = torch.linalg.norm(z_l_0, dim=-1)
+        z_1_norm = torch.linalg.norm(z_l_1, dim=-1)
+        z_norm = torch.max(z_0_norm, z_1_norm)
+        out_of_bounds = z_norm > self.bounds
+        alpha[out_of_bounds] = 0
+        return alpha
+
+    def leapfrog(
+        self, z_0: Tensor, v0: Tensor, z_1: Tensor, v1: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        z_l_0, v_l_0, z_l_1, v_l_1 = z_0.clone(), v0.clone(), z_1.clone(), v1.clone()
+        beta_k_minus_1_sqrt = self.beta_0_sqrt
+        for k in range(self.l):
+            z_l_0, v_l_0, z_l_1, v_l_1 = self.leapfrog_step(z_l_0, v_l_0, z_l_1, v_l_1)
+            beta_k_sqrt = self.tempering(k)
+            v_l_0 = (beta_k_minus_1_sqrt / beta_k_sqrt) * v_l_0
+            v_l_1 = (beta_k_minus_1_sqrt / beta_k_sqrt) * v_l_1
+            beta_k_minus_1_sqrt = beta_k_sqrt
+        return z_l_0, v_l_0, z_l_1, v_l_1
+
+    def sample(self, z_0: Tensor, return_traj=False) -> Tensor | tuple[Tensor, Tensor]:
+        """
+        Given an initial sample z_0, it returns a new sample from the target distribution.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial sample.
+        return_traj : bool
+            If True, it returns the trajectory of the samples.
+
+        Returns
+        -------
+        Tensor (b,d)
+            The new samples.
+        or
+        Tensor (b,N_run,d)
+            The trajectory of the samples. The initial sample is the first element.
+        """
+        z_0 = z_0.clone()
+        z_1 = z_0.clone()
+
+        if return_traj:
+            traj = [z_0.clone()]
+
+        for _ in range(self.N_run):
+            v0 = torch.randn_like(z_0)
+            v1 = torch.randn_like(z_1)
+
+            z_l_0, v_l_0, z_l_1, v_l_1 = self.leapfrog(z_0, v0, z_1, v1)
+            alpha = self.get_alpha(z_l_0, v_l_0, z_l_1, v_l_1, z_0, v0, z_1, v1)
+
+            u = torch.rand_like(alpha)
+            mask = alpha >= u
+            z_0 = torch.where(mask[:, None], z_l_0, z_0)
+            z_1 = torch.where(mask[:, None], z_l_1, z_1)
+
+            if return_traj:
+                traj.append(z_0.clone())
+
+        if return_traj:
+            return torch.stack(traj, dim=1)
+        else:
+            return z_0
