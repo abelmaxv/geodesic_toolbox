@@ -3,6 +3,7 @@ from torch import Tensor
 from .cometric import CoMetric
 from einops import rearrange
 from math import ceil, exp, cos
+from tqdm import tqdm
 
 
 def sample_hypersphere(batch_size: int, dim: int, radius: float = 0.95) -> torch.Tensor:
@@ -182,6 +183,7 @@ def get_mf_image(
     resolution: int = 200,
     use_mf_metric: bool = False,
     max_b_size: int = 512,
+    verbose=True,
 ) -> torch.Tensor:
     """
     Compute the magnification factor on the latent space so as to visualize the distortion of the space.
@@ -193,6 +195,7 @@ def get_mf_image(
     resolution (int): The resolution of the grid.
     use_mf_metric (bool): Whether to use the metric tensor to compute the magnification factor instead of the cometric.
     max_b_size (int): Maximum batch size for the computation.
+    verbose (bool): Whether to print the progress.
 
     Returns:
     mf_image (torch.Tensor) (resolution, resolution), the magnification factor image.
@@ -209,14 +212,21 @@ def get_mf_image(
     Q = torch.stack([xx, yy], dim=-1)
     W, H, _ = Q.shape
     Q = rearrange(Q, "w h c -> (w h) c")
-    mf_image = torch.zeros(W * H)
+    mf_image = torch.zeros(W * H, device=embeddings.device)
     fn = magnification_factor_metric if use_mf_metric else magnification_factor
+    if not verbose:
+        pbar = range(0, W * H, max_b_size)
+    else:
+        pbar = tqdm(range(0, W * H,max_b_size),
+                    desc="Computing magnification factor",
+                    unit="batch",
+                    total=ceil(W * H / max_b_size))
     with torch.no_grad():
         # batch computation to avoid memory issues
-        for i in range(0, W * H, max_b_size):
-            mf_image[i : i + max_b_size] = fn(cometric, Q[i : i + max_b_size])
+        for i in pbar:
+            mf_image[i : i + max_b_size] = fn(cometric, Q[i : i + max_b_size].to(embeddings.device))
     mf_image = rearrange(mf_image, "(w h) -> w h", w=W, h=H).T
-    return mf_image
+    return mf_image.cpu()
 
 def batched_kro(a: Tensor, b: Tensor) -> Tensor:
     """

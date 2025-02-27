@@ -3,6 +3,41 @@ from torch import Tensor
 import torch.nn as nn
 
 
+def SoftAbs(M, alpha=1e3):
+    """
+    SoftAbs regularisation of a matrix M. It is used to ensure that the matrix is positive definite.
+    This is especially useful when using the Fisher information matrix.
+    Essentially, it is a soft version of the absolute value.
+
+    To use around a sampler, just wrap your cometric in a SoftAbs :
+    ```
+    cometric = IdentityCoMetric()
+    cometric = lambda x: SoftAbs(cometric(x))
+    ```
+
+    It is defined as:
+    SoftAbs(M) = Q @ Diag(a_i * coth(alpha * a_i)) @ Q^T
+    where M = Q @ Diag(a_i) @ Q^T is the eigendecomposition of M.
+
+    Parameters
+    ----------
+    M : Tensor (..., n, n)
+        The matrix to regularise.
+    alpha : float
+        The regularisation parameter.
+
+    Returns
+    -------
+    Tensor (..., n, n)
+        The regularised matrix.
+    """
+    D, Q = torch.linalg.eigh(M)
+    D = D * 1 / torch.tanh(alpha * D)
+    G = torch.bmm(torch.diag_embed(D), Q.mH)
+    G = torch.bmm(Q, G)
+    return G
+
+
 class CoMetric(torch.nn.Module):
     """Abstract class for cometrics.
     A cometric is here a function that takes a (batch of) point and returns the cometric tensor at that point.
