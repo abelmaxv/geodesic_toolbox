@@ -6,6 +6,7 @@ from torch.linalg import LinAlgError as _LinAlgError
 
 from .cometric import CoMetric
 
+
 class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
@@ -139,7 +140,7 @@ class ConstantClassSampler(ConditionnalSampler):
 
     def sample(self, z_0: Tensor) -> tuple[Tensor, Tensor]:
         x = self.sampler.sample(z_0)
-        y = torch.full((z_0.shape[0],), self.y, dtype=torch.long,device=z_0.device)
+        y = torch.full((z_0.shape[0],), self.y, dtype=torch.long, device=z_0.device)
         return x, y
 
 
@@ -266,6 +267,8 @@ class HMCSampler(Sampler):
         The initial temperature for the tempering of the momentum.
     pbar : bool
         If True, it shows a progress bar.
+    skip_acceptance : bool
+        If True, the acceptance step is skipped. This can be used when differentiabily is needed.
     """
 
     def __init__(
@@ -277,6 +280,7 @@ class HMCSampler(Sampler):
         bounds: float = 1e3,
         beta_0: float = 1,
         pbar: bool = False,
+        skip_acceptance: bool = False,
     ):
         super().__init__()
         self.cometric = cometric
@@ -307,14 +311,6 @@ class HMCSampler(Sampler):
         v_half = v - self.gamma / 2 * self.grad_U(z)
         z_new = z + self.gamma * v_half
         v_new = v_half - self.gamma / 2 * self.grad_U(z_new)
-
-        # if torch.isnan(z_new).any() or torch.isnan(v_new).any():
-        #     print(f"{z_new=}, {v_new=}")
-        #     print(f"{z=}, {v=}")
-        #     print(f"{self.grad_U(z)=}")
-        #     print(f"{self.grad_U(z_new)=}")
-        #     raise _LinAlgError("NaN values in the leapfrog step.")
-
         return z_new, v_new
 
     def tempering(self, k):
@@ -380,10 +376,12 @@ class HMCSampler(Sampler):
                 # will stop the whole process even for other valid samples.
                 alpha = torch.zeros(z.shape[0])
 
-            u = torch.rand_like(alpha)
-            mask = alpha >= u
-
-            z = torch.where(mask[:, None], z_l, z)
+            if not self.skip_acceptance:
+                u = torch.rand_like(alpha)
+                mask = alpha >= u
+                z = torch.where(mask[:, None], z_l, z)
+            else:
+                z = z_l
 
             if return_traj:
                 traj.append(z.clone())
@@ -414,6 +412,8 @@ class MMALA(Sampler):
         The bounds of the manifold.
     pbar : bool
         Whether to display a progress bar or not.
+    skip_acceptance : bool
+        If True, the acceptance step is skipped. This can be used when differentiabily is needed.
     """
 
     def __init__(
@@ -424,6 +424,7 @@ class MMALA(Sampler):
         N_run: int,
         bounds: float,
         pbar: bool = False,
+        skip_acceptance: bool = False,
     ) -> None:
         super().__init__()
         self.cometric = cometric
@@ -510,11 +511,14 @@ class MMALA(Sampler):
 
         for k in range(self.N_run):
             z_l = self.run(z)
-            alpha = self.get_alpha(z, z_l)
 
-            u = torch.rand_like(alpha)
-            mask = alpha >= u
-            z = torch.where(mask[:, None], z_l, z)
+            if not self.skip_acceptance:
+                alpha = self.get_alpha(z, z_l)
+                u = torch.rand_like(alpha)
+                mask = alpha >= u
+                z = torch.where(mask[:, None], z_l, z)
+            else:
+                z = z_l
 
             if return_traj:
                 traj.append(z.clone())
@@ -534,6 +538,8 @@ class ImplicitRHMCSampler(Sampler):
     But this class is easily heritable to define other target distributions. Just redefine
     the p_target method.
 
+    @TODO: This implementation is not stable at all. Sometimes it diverges thus no samples are accepted.
+
     Parameters
     ----------
     cometric : CoMetric
@@ -552,6 +558,8 @@ class ImplicitRHMCSampler(Sampler):
         The initial temperature for the tempering of the momentum.
     pbar : bool
         If True, it shows a progress bar.
+    skip_acceptance : bool
+        If True, the acceptance step is skipped. This can be used when differentiabily is needed.
     """
 
     def __init__(
@@ -564,6 +572,7 @@ class ImplicitRHMCSampler(Sampler):
         bounds: float = 1e3,
         beta_0: float = 1,
         pbar: bool = False,
+        skip_acceptance: bool = False,
     ):
         super().__init__()
         self.cometric = cometric
@@ -574,6 +583,7 @@ class ImplicitRHMCSampler(Sampler):
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
         self.pbar = pbar
+        self.skip_acceptance = skip_acceptance
 
         self._grad_U = torch.func.jacrev(self.U)
         self._dH_dz_ = torch.func.jacrev(self.H, argnums=0)
@@ -682,12 +692,17 @@ class ImplicitRHMCSampler(Sampler):
             v_0 = torch.randn_like(z)
 
             z_l, v_l = self.leapfrog(z, v_0)
-            alpha = self.get_alpha(z, v_0, z_l, v_l)
 
-            u = torch.rand_like(alpha)
-            mask = alpha >= u
+            if not self.skip_acceptance:
+                alpha = self.get_alpha(z, v_0, z_l, v_l)
 
-            z = torch.where(mask[:, None], z_l, z)
+                u = torch.rand_like(alpha)
+                mask = alpha >= u
+
+                z = torch.where(mask[:, None], z_l, z)
+
+            else:
+                z = z_l
 
             if return_traj:
                 traj.append(z.clone())
@@ -696,8 +711,6 @@ class ImplicitRHMCSampler(Sampler):
             return torch.stack(traj, dim=1)
         else:
             return z
-
-
 
 
 class ExplicitRHMCSampler(Sampler):
@@ -709,6 +722,7 @@ class ExplicitRHMCSampler(Sampler):
     But this class is easily heritable to define other target distributions. Just redefine
     the p_target method.
 
+    @TODO: This implementation is not stable at all. Sometimes it diverges thus no samples are accepted.
     Parameters
     ----------
     cometric : CoMetric
@@ -727,6 +741,8 @@ class ExplicitRHMCSampler(Sampler):
         The initial temperature for the tempering of the momentum.
     pbar : bool
         If True, it shows a progress bar.
+    skip_acceptance : bool
+        If True, the acceptance step is skipped. This can be used when differentiabily is needed.
     """
 
     def __init__(
@@ -739,6 +755,7 @@ class ExplicitRHMCSampler(Sampler):
         bounds: float = 1e3,
         beta_0: float = 1,
         pbar: bool = False,
+        skip_acceptance: bool = False,
     ):
         super().__init__()
         self.cometric = cometric
@@ -749,6 +766,7 @@ class ExplicitRHMCSampler(Sampler):
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
         self.pbar = pbar
+        self.skip_acceptance = skip_acceptance
 
         c = torch.Tensor([2 * self.omega * self.gamma]).cos()
         s = torch.Tensor([2 * self.omega * self.gamma]).sin()
@@ -765,13 +783,13 @@ class ExplicitRHMCSampler(Sampler):
         return p
 
     def U(self, z: Tensor) -> Tensor:
-        return -torch.log(self.p_target(z))
+        return -torch.log(self.p_target(z) + 1e-6)
 
     def K(self, v: Tensor) -> Tensor:
         g_inv = self.cometric(v)
         det_g = 1 / g_inv.det().abs()
         velocity = torch.einsum("bi,bij,bj->b", v, g_inv, v)
-        return 0.5 * velocity + 0.5 * torch.log(det_g)
+        return 0.5 * velocity + 0.5 * torch.log(det_g + 1e-6)
 
     def H_base(self, z: Tensor, v: Tensor) -> Tensor:
         return self.U(z) + self.K(v)
@@ -873,7 +891,7 @@ class ExplicitRHMCSampler(Sampler):
             beta_k_minus_1_sqrt = beta_k_sqrt
         return z_l_0, v_l_0, z_l_1, v_l_1
 
-    def sample(self, z_0: Tensor, return_traj=False) -> Tensor | tuple[Tensor, Tensor]:
+    def sample(self, z_0: Tensor, return_traj=False) -> Tensor:
         """
         Given an initial sample z_0, it returns a new sample from the target distribution.
 
@@ -899,16 +917,21 @@ class ExplicitRHMCSampler(Sampler):
             traj = [z_0.clone()]
 
         for _ in range(self.N_run):
-            v0 = torch.randn_like(z_0)
-            v1 = torch.randn_like(z_1)
+            v_0 = torch.randn_like(z_0)
+            v_1 = torch.randn_like(z_1)
 
-            z_l_0, v_l_0, z_l_1, v_l_1 = self.leapfrog(z_0, v0, z_1, v1)
-            alpha = self.get_alpha(z_l_0, v_l_0, z_l_1, v_l_1, z_0, v0, z_1, v1)
+            z_l_0, v_l_0, z_l_1, v_l_1 = self.leapfrog(z_0, v_0, z_1, v_1)
 
-            u = torch.rand_like(alpha)
-            mask = alpha >= u
-            z_0 = torch.where(mask[:, None], z_l_0, z_0)
-            z_1 = torch.where(mask[:, None], z_l_1, z_1)
+            if not self.skip_acceptance:
+                alpha = self.get_alpha(z_l_0, v_l_0, z_l_1, v_l_1, z_0, v_0, z_1, v_1)
+
+                u = torch.rand_like(alpha)
+                mask = alpha >= u
+                z_0 = torch.where(mask[:, None], z_l_0, z_0)
+                z_1 = torch.where(mask[:, None], z_l_1, z_1)
+            else:
+                z_0 = z_l_0
+                z_1 = z_l_1
 
             if return_traj:
                 traj.append(z_0.clone())
