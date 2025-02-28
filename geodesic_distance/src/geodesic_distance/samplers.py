@@ -290,6 +290,7 @@ class HMCSampler(Sampler):
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
         self.pbar = pbar
+        self.skip_acceptance = skip_acceptance
 
         self._grad_U = torch.func.jacrev(self.U)
         self.grad_U = lambda z: self._grad_U(z).sum(1)
@@ -433,6 +434,7 @@ class MMALA(Sampler):
         self.N_run = N_run
         self.bounds = bounds
         self.pbar = pbar
+        self.skip_acceptance = skip_acceptance
 
         self._grad_U = torch.func.jacrev(self.U)
         self.grad_U = lambda z: self._grad_U(z).sum(1)
