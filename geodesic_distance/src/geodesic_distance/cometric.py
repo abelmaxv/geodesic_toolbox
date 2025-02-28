@@ -548,3 +548,42 @@ class LiftedCometric(CoMetric):
     def forward(self, q):
         g = self.metric(q)
         return torch.linalg.inv(g)
+
+
+class FisherRaoCometric(CoMetric):
+    """
+    Cometric based on the Fisher-Rao metric, ie the hessian of the log-likelihood function.
+    The metric is given by:
+    g(x) = - H_f(x) + reg_coef * Id
+    where H_f is the hessian of the log-likelihood function at x.
+
+    Parameters
+    ----------
+    log_likelihood : callable
+        Log-likelihood function of signature (B,d) -> (B,)
+    reg_coef : float
+        Regularization coefficient for the metric
+    softabs_alpha : float
+        Regularization parameter for the softabs function. If None, no regularization is applied.
+    """
+
+    def __init__(self, log_likelihood: callable, reg_coef: float = 1e-3, softabs_alpha=None):
+        super().__init__()
+        self.log_likelihood = log_likelihood
+        self.reg_coef = reg_coef
+
+        hessian__ = torch.func.hessian(self.log_likelihood)
+        hessian_ = lambda q: torch.einsum("Bbibj->Bij", hessian__(q))
+        if softabs_alpha is not None:
+            self.hessian = lambda x: SoftAbs(hessian_(x), alpha=softabs_alpha)
+        else:
+            self.hessian = hessian_
+
+    def metric(self, q: torch.Tensor):
+        g = -self.hessian(q)
+        g += self.reg_coef * self.eye(q)
+        return g
+
+    def forward(self, q: torch.Tensor):
+        g = self.metric(q)
+        return torch.linalg.inv(g)
