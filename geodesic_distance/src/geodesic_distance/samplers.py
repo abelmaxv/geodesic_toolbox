@@ -375,7 +375,8 @@ class HMCSampler(Sampler):
                 # Not the best way to handle this error.
                 # Because a single LinAlgError for a given sample
                 # will stop the whole process even for other valid samples.
-                alpha = torch.zeros(z.shape[0])
+                alpha = torch.zeros(z.shape[0], device=z.device)
+                z_l = z.clone()
 
             if not self.skip_acceptance:
                 u = torch.rand_like(alpha)
