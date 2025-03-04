@@ -587,3 +587,35 @@ class FisherRaoCometric(CoMetric):
     def forward(self, q: torch.Tensor):
         g = self.metric(q)
         return torch.linalg.inv(g)
+
+
+class SumOfCometric(CoMetric):
+    """
+    Sum of two cometrics. The metric is the sum of the two metrics.
+
+    Parameters
+    ----------
+    cometric1: CoMetric
+        First cometric tensor
+    cometric2: CoMetric
+        Second cometric tensor
+    beta : float
+        Scaling factor for the sum of cometrics
+    """
+
+    def __init__(self, cometric1: CoMetric, cometric2: CoMetric, beta: float = 1):
+        super().__init__()
+        self.cometric1 = cometric1
+        self.cometric2 = cometric2
+        self.beta = beta
+
+    def metric(self, q: torch.Tensor):
+        return self.cometric1.metric(q) + self.beta * self.cometric2.metric(q)
+
+    def forward(self, q: torch.Tensor):
+        return torch.linalg.inv(self.metric(q))
+
+    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+        v_1 = self.cometric1.inverse_forward(q, p)
+        v_2 = self.cometric2.inverse_forward(q, p)
+        return v_1 + self.beta * v_2

@@ -8,8 +8,9 @@ from .cometric import CoMetric
 
 
 class Sampler(nn.Module):
-    def __init__(self):
+    def __init__(self, pbar: bool = False):
         super().__init__()
+        self.pbar = pbar
 
     def sample(self, z_0: Tensor) -> Tensor:
         """
@@ -64,8 +65,8 @@ class Sampler(nn.Module):
 
 
 class ConditionnalSampler(Sampler):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, pbar: bool = False):
+        super().__init__(pbar)
 
     def sample(self, z_0: Tensor) -> Tensor:
         """
@@ -133,8 +134,8 @@ class ConditionnalSampler(Sampler):
 
 
 class ConstantClassSampler(ConditionnalSampler):
-    def __init__(self, sampler: Sampler, y: int):
-        super().__init__()
+    def __init__(self, sampler: Sampler, y: int, pbar: bool = False):
+        super().__init__(pbar)
         self.sampler = sampler
         self.y = y
 
@@ -282,14 +283,13 @@ class HMCSampler(Sampler):
         pbar: bool = False,
         skip_acceptance: bool = False,
     ):
-        super().__init__()
+        super().__init__(pbar)
         self.cometric = cometric
         self.l = l
         self.gamma = gamma
         self.N_run = N_run
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
-        self.pbar = pbar
         self.skip_acceptance = skip_acceptance
 
         self._grad_U = torch.func.jacrev(self.U)
@@ -428,13 +428,12 @@ class MMALA(Sampler):
         pbar: bool = False,
         skip_acceptance: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(pbar)
         self.cometric = cometric
         self.l = l
         self.gamma = gamma
         self.N_run = N_run
         self.bounds = bounds
-        self.pbar = pbar
         self.skip_acceptance = skip_acceptance
 
         self._grad_U = torch.func.jacrev(self.U)
@@ -577,7 +576,7 @@ class ImplicitRHMCSampler(Sampler):
         pbar: bool = False,
         skip_acceptance: bool = False,
     ):
-        super().__init__()
+        super().__init__(pbar)
         self.cometric = cometric
         self.l = l
         self.N_fx = N_fx
@@ -585,7 +584,6 @@ class ImplicitRHMCSampler(Sampler):
         self.N_run = N_run
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
-        self.pbar = pbar
         self.skip_acceptance = skip_acceptance
 
         self._grad_U = torch.func.jacrev(self.U)
@@ -760,7 +758,7 @@ class ExplicitRHMCSampler(Sampler):
         pbar: bool = False,
         skip_acceptance: bool = False,
     ):
-        super().__init__()
+        super().__init__(pbar)
         self.cometric = cometric
         self.l = l
         self.gamma = gamma
@@ -768,7 +766,6 @@ class ExplicitRHMCSampler(Sampler):
         self.N_run = N_run
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
-        self.pbar = pbar
         self.skip_acceptance = skip_acceptance
 
         c = torch.Tensor([2 * self.omega * self.gamma]).cos()
