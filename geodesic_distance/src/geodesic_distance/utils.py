@@ -10,13 +10,19 @@ def sample_hypersphere(batch_size: int, dim: int, radius: float = 0.95) -> torch
     """
     Sample points from a D-dimensional hypersphere.
 
-    Args:
-    batch_size (int): Number of points to sample.
-    dim (int): Dimension of the hypersphere.
-    radius (float): Radius of the hypersphere. Default is 1.0.
+    Parameters:
+    ----------
+    batch_size : int
+        Number of points to sample.
+    dim : int
+        Dimension of the hypersphere.
+    radius : float
+        Radius of the hypersphere. Default is 1.0.
 
     Returns:
-    torch.Tensor: Tensor, (batch_size, dim) containing the sampled points.
+    -------
+    torch.Tensor (batch_size, dim)
+        Tensor containing the sampled points.
     """
     # Sample from standard normal distribution
     normal_samples = torch.randn(batch_size, dim)
@@ -40,12 +46,44 @@ def delta(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 
 
 def pointcarre_dst(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """
+    Computes the distance between two points on the Poincaré ball.
+
+    Parameters:
+    ----------
+    u : torch.Tensor (batch_size, dim)
+        First point.
+    v : torch.Tensor (batch_size, dim)
+        Second point.
+
+    Returns:
+    -------
+    torch.Tensor (batch_size,)
+        Tensor containing the distances.
+    """
     return torch.arccosh(1 + delta(u, v))
 
 
 def scaled_euclidean_dst(
     u: torch.Tensor, v: torch.Tensor, scale: torch.Tensor
 ) -> torch.Tensor:
+    """
+    Computes the distance between two points on a manifold where the metric is given by scale * I.
+
+    Parameters:
+    ----------
+    u : torch.Tensor (batch_size, dim)
+        First point.
+    v : torch.Tensor (batch_size, dim)
+        Second point.
+    scale : torch.Tensor (batch_size,)
+        Scaling factor.
+
+    Returns:
+    -------
+    torch.Tensor (batch_size,)
+        Tensor containing the distances.
+    """
     return scale.sqrt() * torch.linalg.vector_norm(u - v, dim=-1)
 
 
@@ -53,11 +91,15 @@ def get_bounds(embeddings: torch.Tensor) -> torch.Tensor:
     """
     Compute the bounds of the embeddings.
 
-    Args:
-    embeddings (torch.Tensor) (n_points, 2), the embeddings of the points.
+    Parameters:
+    ----------
+    embeddings : torch.Tensor (n_points, 2)
+        The embeddings of the points.
 
     Returns:
-    bounds (list): [min_x, max_x, min_y, max_y], the bounds of the embeddings.
+    -------
+    torch.Tensor (4,)
+        [min_x, max_x, min_y, max_y], the bounds of the embeddings.
     """
     min_x, max_x = embeddings[:, 0].min(), embeddings[:, 0].max()
     min_y, max_y = embeddings[:, 1].min(), embeddings[:, 1].max()
@@ -72,14 +114,18 @@ def magnification_factor(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
     This is always well defined because G(z) is positive definite.
     This implementation is based on the fact that det G(z) = 1 / det G_inv(z).
 
-    Params:
-    g_inv : CoMetric, function that outputs the inverse metric tensor as a (b,d,d) matrix
-    z : Tensor (b,d), point at which to compute the magnification factor
+    Parameters:
+    ----------
+    g_inv : CoMetric
+        Function that outputs the inverse metric tensor as a (b,d,d) matrix
+    z : torch.Tensor (b,d)
+        Point at which to compute the magnification factor
 
-    Output:
-    mf : Tensor (b,), magnification factor
+    Returns:
+    -------
+    mf : torch.Tensor (b,)
+        Magnification factor
     """
-
     G_inv = g_inv(z)
     return torch.det(G_inv).abs().pow(-0.5)
 
@@ -90,14 +136,18 @@ def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tenso
     This is always well defined because G(z) is positive definite.
     This implementation uses the metric tensor instead of the inverse metric tensor.
 
-    Params:
-    g_inv : CoMetric, function that outputs the inverse metric tensor as a (b,d,d) matrix
-    z : Tensor (b,d), point at which to compute the magnification factor
+    Parameters:
+    ----------
+    g_inv : CoMetric
+        Function that outputs the inverse metric tensor as a (b,d,d) matrix
+    z : torch.Tensor (b,d)
+        Point at which to compute the magnification factor
 
-    Output:
-    mf : Tensor (b,), magnification factor
+    Returns:
+    -------
+    mf : torch.Tensor (b,)
+        Magnification factor
     """
-
     G = g_inv.metric(z)
     return torch.det(G).abs().pow(0.5)
 
@@ -106,28 +156,40 @@ def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tenso
 def hamiltonian(G_inv: Tensor, p: Tensor) -> Tensor:
     """
     Computes the hamiltonian at point q yielding cometric G_inv(q) for the momentum p.
+    It is defined as H(p,q) = p^T G_inv(q) p.
 
-    Params:
-    G_inv : Tensor, (b,d,d) cometric tensor
-    p : Tensor, (b,d) momentum
+    Parameters:
+    ----------
+    G_inv : Tensor (b,d,d)
+        Cometric tensor.
+    p : Tensor (b,d)
+        Momentum.
 
-    Output:
-    res : Tensor, (b,) hamiltonian
+    Returns:
+    -------
+    res : Tensor (b,)
+        Hamiltonian.
     """
     res = torch.einsum("...i,...ij,...j->...", p, G_inv, p)
     return res
 
 
 def scale_lr_magnification(mf: float, base_lr: float) -> float:
-    """Scales the learning rate according to the magnification factor.
+    """
+    Scales the learning rate according to the magnification factor.
     This is to avoid shooting being stuck in high curvature region.
 
-    Params:
-    mf : float, magnification factor
-    base_lr : float, base learning rate
+    Parameters:
+    ----------
+    mf : float
+        Magnification factor.
+    base_lr : float
+        Base learning rate.
 
-    Output:
-    new_lr : float, scaled learning rate
+    Returns:
+    -------
+    new_lr : float
+        Scaled learning rate.
     """
     max_scale = 50
     min_scale = 0.1
@@ -137,14 +199,19 @@ def scale_lr_magnification(mf: float, base_lr: float) -> float:
 
 
 def constant_time_scaling_schedule(x: float) -> float:
-    """Constant time scaling schedule.
+    """
+    Constant time scaling schedule.
     Results in ceil(1/dt)*(n_step + 1) integration steps.
 
-    Params:
-    x : float, current iteration progress (0 to 1)
+    Parameters:
+    ----------
+    x : float
+        Current iteration progress (0 to 1)
 
-    Output:
-    scaling : float, scaling factor
+    Returns:
+    -------
+    scaling : float
+        Scaling factor
     """
     return 1
 
@@ -153,12 +220,17 @@ def linear_time_scaling_schedule(x: float, max_scaling: float = 5) -> float:
     """Linear ramp from max_scaling to 1.
     Results in ()*(n_step + 1) integration steps.
 
-    Params:
-    x : float, current iteration progress (0 to 1)
-    max_scaling : float, maximum scaling factor
+    Parameters:
+    ----------
+    x : float
+        Current iteration progress (0 to 1)
+    max_scaling : float
+        Maximum scaling factor
 
-    Output:
-    scaling : float, scaling factor
+    Returns:
+    -------
+    scaling : float
+        Scaling factor
     """
     return 1 + (max_scaling - 1) * (1 - x)
 
@@ -166,12 +238,17 @@ def linear_time_scaling_schedule(x: float, max_scaling: float = 5) -> float:
 def cosine_time_scaling_schedule(x: float, max_scaling: float = 5) -> float:
     """Cosine decay from max_scaling to 1
 
-    Params:
-    x : float, current iteration progress (0 to 1)
-    max_scaling : float, maximum scaling factor
+    Parameters:
+    ----------
+    x : float
+        Current iteration progress (0 to 1)
+    max_scaling : float
+        Maximum scaling factor
 
-    Output:
-    scaling : float, scaling factor
+    Returns:
+    -------
+    scaling : float
+        Scaling factor
     """
     return 1 + (max_scaling - 1) * (1 + cos(x * 3.1415)) / 2
 
@@ -188,17 +265,27 @@ def get_mf_image(
     """
     Compute the magnification factor on the latent space so as to visualize the distortion of the space.
 
-    Args:
-    cometric (CoMetric): The CoMetric object.
-    embeddings (torch.Tensor) (n_points, 2), the embeddings of the points.
-    bounds (list): [min_x, max_x, min_y, max_y], the bounds of the embeddings.
-    resolution (int): The resolution of the grid.
-    use_mf_metric (bool): Whether to use the metric tensor to compute the magnification factor instead of the cometric.
-    max_b_size (int): Maximum batch size for the computation.
-    verbose (bool): Whether to print the progress.
+    Parameters:
+    ----------
+    cometric : CoMetric
+        The CoMetric object.
+    embeddings : torch.Tensor (n_points, 2)
+        The embeddings of the points.
+    bounds : list
+        [min_x, max_x, min_y, max_y], the bounds of the embeddings.
+    resolution : int
+        The resolution of the grid.
+    use_mf_metric : bool
+        Whether to use the metric tensor to compute the magnification factor instead of the cometric tensor.
+    max_b_size : int
+        Maximum batch size for the computation.
+    verbose : bool
+        Whether to print the progress.
 
     Returns:
-    mf_image (torch.Tensor) (resolution, resolution), the magnification factor image.
+    -------
+    mf_image : torch.Tensor (resolution, resolution)
+        The magnification factor image.
     """
     if bounds is None and embeddings is None:
         raise ValueError("Either bounds or embeddings must be provided.")
@@ -217,16 +304,21 @@ def get_mf_image(
     if not verbose:
         pbar = range(0, W * H, max_b_size)
     else:
-        pbar = tqdm(range(0, W * H,max_b_size),
-                    desc="Computing magnification factor",
-                    unit="batch",
-                    total=ceil(W * H / max_b_size))
+        pbar = tqdm(
+            range(0, W * H, max_b_size),
+            desc="Computing magnification factor",
+            unit="batch",
+            total=ceil(W * H / max_b_size),
+        )
     with torch.no_grad():
         # batch computation to avoid memory issues
         for i in pbar:
-            mf_image[i : i + max_b_size] = fn(cometric, Q[i : i + max_b_size].to(embeddings.device))
+            mf_image[i : i + max_b_size] = fn(
+                cometric, Q[i : i + max_b_size].to(embeddings.device)
+            )
     mf_image = rearrange(mf_image, "(w h) -> w h", w=W, h=H).T
     return mf_image.cpu()
+
 
 def batched_kro(a: Tensor, b: Tensor) -> Tensor:
     """
@@ -282,6 +374,4 @@ def vec(M: Tensor) -> Tensor:
     Tensor
         (b, m*n)
     """
-
     return rearrange(M, "b m n -> b (m n)")
-

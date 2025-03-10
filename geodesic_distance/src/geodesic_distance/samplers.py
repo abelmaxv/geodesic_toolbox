@@ -8,6 +8,15 @@ from .cometric import CoMetric
 
 
 class Sampler(nn.Module):
+    """
+    Base class for the samplers. It defines the interface for the samplers.
+
+    Parameters
+    ----------
+    pbar : bool
+        If True, it shows a progress bar when sampling.
+    """
+
     def __init__(self, pbar: bool = False):
         super().__init__()
         self.pbar = pbar
@@ -32,6 +41,9 @@ class Sampler(nn.Module):
     def forward(self, z_0: Tensor, n: int) -> Tensor:
         """
         Given initial samples z_0, it returns n new samples for each initial sample.
+
+        Beware that tuning both the batch-size and n is important to avoid using too
+        much memory.
 
         Parameters
         ----------
@@ -65,12 +77,22 @@ class Sampler(nn.Module):
 
 
 class ConditionnalSampler(Sampler):
+    """
+    Base class for the conditionnal samplers.
+    These samplers generate samples from a target distribution conditioned on a class.
+
+    Parameters
+    ----------
+    pbar : bool
+        If True, it shows a progress bar when sampling.
+    """
+
     def __init__(self, pbar: bool = False):
         super().__init__(pbar)
 
     def sample(self, z_0: Tensor) -> Tensor:
         """
-        Given an initial sample z_0, it returns a new sample from the target distribution.
+        Given an initial sample z_0, it returns a new sample from the target distribution with the associated class.
 
         Parameters
         ----------
@@ -89,7 +111,8 @@ class ConditionnalSampler(Sampler):
     @torch.no_grad()
     def forward(self, z_0: Tensor, n: int) -> tuple[Tensor, Tensor]:
         """
-        Given initial samples z_0, it returns n new samples for each initial sample.
+        Given initial samples z_0, it returns n new samples for each initial sample
+        with the associated class.
 
         Parameters
         ----------
@@ -134,6 +157,19 @@ class ConditionnalSampler(Sampler):
 
 
 class ConstantClassSampler(ConditionnalSampler):
+    """
+    Conditionnal sampler that generates samples from a target distribution with a constant class.
+
+    Parameters
+    ----------
+    sampler : Sampler
+        The sampler to use.
+    y : int
+        The class of the samples.
+    pbar : bool
+        If True, it shows a progress bar when sampling.
+    """
+
     def __init__(self, sampler: Sampler, y: int, pbar: bool = False):
         super().__init__(pbar)
         self.sampler = sampler
@@ -146,6 +182,15 @@ class ConstantClassSampler(ConditionnalSampler):
 
 
 class MixtureOfSamplers(nn.Module):
+    """
+    Mixture of samplers. It generates samples from a mixture of samplers.
+
+    Parameters
+    ----------
+    samplers : list[Sampler]
+        The samplers to use
+    """
+
     def __init__(self, samplers: list[Sampler]):
         super().__init__()
         self.samplers = samplers
@@ -177,6 +222,8 @@ class MixtureOfSamplers(nn.Module):
 
         for i in range(self.n_samplers):
             n_i = n // self.n_samplers
+            if n_i == 0:
+                continue
             x_i = self.samplers[i](z_0, n_i)
             x.append(x_i)
 
@@ -194,6 +241,15 @@ class MixtureOfSamplers(nn.Module):
 
 
 class MixtureOfCondtionnalSamplers(nn.Module):
+    """
+    Mixture of conditionnal samplers. It generates samples from a mixture of conditionnal samplers.
+
+    Parameters
+    ----------
+    samplers : list[ConditionnalSampler]
+        The conditionnal samplers to use
+    """
+
     def __init__(self, samplers: list[ConditionnalSampler]):
         super().__init__()
         self.samplers = samplers
@@ -246,7 +302,7 @@ class MixtureOfCondtionnalSamplers(nn.Module):
 class HMCSampler(Sampler):
     """
     Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
-    It uses the leapfrog integratorto propose new samples from the target distribution.
+    It uses the leapfrog integrator to propose new samples from the target distribution.
     It uses a tempering scheme on the momentum.
     Here the target distribution is defined by the volume element of the cometric.
     But this class is easily heritable to define other target distributions. Just redefine
@@ -323,7 +379,26 @@ class HMCSampler(Sampler):
         return torch.min(torch.ones_like(alpha), alpha)
 
     def get_alpha(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
-        """Compute the proposal rates. If the new sample is out of bounds, the proposal rate is 0."""
+        """
+        Compute the proposal rates.
+        If the new sample is out of bounds, the proposal rate is 0.
+
+        Parameters
+        ----------
+        z : Tensor (b,d)
+            The initial position.
+        v : Tensor (b,d)
+            The initial velocity.
+        z_new : Tensor (b,d)
+            The new position.
+        v_new : Tensor (b,d)
+            The new velocity.
+
+        Returns
+        -------
+        Tensor (b,)
+            The proposal rates.
+        """
         alpha = self.proposal_rate(z, v, z_new, v_new)
         z_norm = torch.linalg.norm(z_new, dim=-1)
         out_of_bounds = z_norm > self.bounds
@@ -534,7 +609,8 @@ class MMALA(Sampler):
 class ImplicitRHMCSampler(Sampler):
     """
     Riemannian Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
-    It uses the leapfrog integratorto propose new samples from the target distribution.
+    It uses the leapfrog integrator to propose new samples from the target distribution.
+    The leapfrog integrator is solved implicitly.
     It uses a tempering scheme on the momentum.
     Here the target distribution is defined by the volume element of the cometric.
     But this class is easily heritable to define other target distributions. Just redefine
@@ -587,11 +663,11 @@ class ImplicitRHMCSampler(Sampler):
         self.skip_acceptance = skip_acceptance
 
         self._grad_U = torch.func.jacrev(self.U)
-        self._dH_dz_ = torch.func.jacrev(self.H, argnums=0)
+        self._dH_dz = torch.func.jacrev(self.H, argnums=0)
         self._dH_dv = torch.func.jacrev(self.H, argnums=1)
 
         self.grad_U = lambda z: self._grad_U(z).sum(1)
-        self.dH_dz = lambda z, v: self._dH_dz_(z, v).sum(1)
+        self.dH_dz = lambda z, v: self._dH_dz(z, v).sum(1)
         self.dH_dv = lambda z, v: self._dH_dv(z, v).sum(1)
 
     def p_target(self, z: Tensor) -> Tensor:
@@ -665,25 +741,6 @@ class ImplicitRHMCSampler(Sampler):
         return z_new, v_new
 
     def sample(self, z_0: Tensor, return_traj=False) -> Tensor:
-        """
-        Given an initial sample z_0, it returns a new sample from the target distribution.
-
-        Parameters
-        ----------
-        z_0 : Tensor (b,d)
-            The initial sample.
-        return_traj : bool
-            If True, it returns the trajectory of the samples.
-
-        Returns
-        -------
-        Tensor (b,d)
-            The new samples.
-        or
-        Tensor (b,N_run,d)
-            The trajectory of the samples. The initial sample is the first element.
-        """
-
         z = z_0.clone()
 
         if return_traj:
@@ -722,6 +779,9 @@ class ExplicitRHMCSampler(Sampler):
     Here the target distribution is defined by the volume element of the cometric.
     But this class is easily heritable to define other target distributions. Just redefine
     the p_target method.
+
+    `Introducing an Explicit Symplectic Integration Scheme for Riemannian Manifold Hamiltonian Monte Carlo`
+    by Cobb et Baydin et al (2019).
 
     @TODO: This implementation is not stable at all. Sometimes it diverges thus no samples are accepted.
     Parameters
@@ -892,24 +952,6 @@ class ExplicitRHMCSampler(Sampler):
         return z_l_0, v_l_0, z_l_1, v_l_1
 
     def sample(self, z_0: Tensor, return_traj=False) -> Tensor:
-        """
-        Given an initial sample z_0, it returns a new sample from the target distribution.
-
-        Parameters
-        ----------
-        z_0 : Tensor (b,d)
-            The initial sample.
-        return_traj : bool
-            If True, it returns the trajectory of the samples.
-
-        Returns
-        -------
-        Tensor (b,d)
-            The new samples.
-        or
-        Tensor (b,N_run,d)
-            The trajectory of the samples. The initial sample is the first element.
-        """
         z_0 = z_0.clone()
         z_1 = z_0.clone()
 
