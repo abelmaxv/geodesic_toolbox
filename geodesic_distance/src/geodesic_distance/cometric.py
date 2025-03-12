@@ -81,6 +81,21 @@ class CoMetric(torch.nn.Module):
         # return torch.linalg.solve_ex(self.forward(q), p)
         return torch.linalg.solve(self.forward(q), p)
 
+    def __add__(self, other):
+        if isinstance(other, CoMetric):
+            return SumOfCometric(self, other)
+        else:
+            raise ValueError(f"Cannot add {type(other)} to CoMetric")
+
+    def __mul__(self, other):
+        if isinstance(other, (int, float)):
+            return ScaledCometric(self, other)
+        else:
+            raise ValueError(f"Cannot multiply {type(other)} to CoMetric")
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
     def eye(self, x):
         """Helper function to create a batch of identity matrices on
         the proper device and with the proper dtype
@@ -95,6 +110,68 @@ class CoMetric(torch.nn.Module):
         id = torch.eye(dim, dtype=x.dtype, device=x.device).unsqueeze(0)
         id = id.expand(B, -1, -1)
         return id
+
+
+class SumOfCometric(CoMetric):
+    """
+    Sum of two cometrics. The metric is the sum of the two metrics.
+
+    Parameters
+    ----------
+    cometric1: CoMetric
+        First cometric tensor
+    cometric2: CoMetric
+        Second cometric tensor
+    beta : float
+        Scaling factor for the sum of cometrics
+    """
+
+    def __init__(self, cometric1: CoMetric, cometric2: CoMetric):
+        super().__init__()
+        self.cometric1 = cometric1
+        self.cometric2 = cometric2
+
+    def metric(self, q: torch.Tensor):
+        return self.cometric1.metric(q) + self.cometric2.metric(q)
+
+    def forward(self, q: torch.Tensor):
+        return torch.linalg.inv(self.metric(q))
+
+    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+        v_1 = self.cometric1.inverse_forward(q, p)
+        v_2 = self.cometric2.inverse_forward(q, p)
+        return v_1 + v_2
+
+
+class ScaledCometric(CoMetric):
+    """
+    Cometric that is a scaled version of another cometric.
+    The new metric is G'(q) = beta * G(q) where G(q) is the metric of the original cometric.
+
+    Parameters
+    ----------
+    cometric : CoMetric
+        The cometric to scale
+    beta : float
+        Scaling factor
+    """
+
+    def __init__(self, cometric: CoMetric, beta: float):
+        super().__init__()
+        self.cometric = cometric
+        self.beta = beta
+
+    def forward(self, q: Tensor) -> Tensor:
+        return 1 / self.beta * self.cometric.forward(q)
+
+    def metric(self, q: Tensor) -> Tensor:
+        return self.beta * self.cometric.metric(q)
+
+    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+        return self.beta * self.cometric.inverse_forward(q, p)
+
+    def extra_repr(self) -> str:
+        return f"beta={self.beta}"
 
 
 class IdentityCoMetric(CoMetric):
@@ -587,35 +664,3 @@ class FisherRaoCometric(CoMetric):
     def forward(self, q: torch.Tensor):
         g = self.metric(q)
         return torch.linalg.inv(g)
-
-
-class SumOfCometric(CoMetric):
-    """
-    Sum of two cometrics. The metric is the sum of the two metrics.
-
-    Parameters
-    ----------
-    cometric1: CoMetric
-        First cometric tensor
-    cometric2: CoMetric
-        Second cometric tensor
-    beta : float
-        Scaling factor for the sum of cometrics
-    """
-
-    def __init__(self, cometric1: CoMetric, cometric2: CoMetric, beta: float = 1):
-        super().__init__()
-        self.cometric1 = cometric1
-        self.cometric2 = cometric2
-        self.beta = beta
-
-    def metric(self, q: torch.Tensor):
-        return self.cometric1.metric(q) + self.beta * self.cometric2.metric(q)
-
-    def forward(self, q: torch.Tensor):
-        return torch.linalg.inv(self.metric(q))
-
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        v_1 = self.cometric1.inverse_forward(q, p)
-        v_2 = self.cometric2.inverse_forward(q, p)
-        return v_1 + self.beta * v_2
