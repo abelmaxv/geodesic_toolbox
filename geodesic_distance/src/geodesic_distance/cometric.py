@@ -664,3 +664,35 @@ class FisherRaoCometric(CoMetric):
     def forward(self, q: torch.Tensor):
         g = self.metric(q)
         return torch.linalg.inv(g)
+
+
+class KernelMetric(CoMetric):
+    """
+    Construct a smooth cometric tensor by the evaluation of the cometric at 
+    given keypoints.
+
+    Parameters
+    ----------
+    c : torch.Tensor (K,d)
+        The keypoints
+    sigma : float
+        The bandwidth of the kernel
+    base_cometric : CoMetric
+        The base cometric tensor. It will only be evaluated once at the keypoints.
+    reg_coef : float
+        Regularization coefficient for the cometric
+    """
+    def __init__(self, c:Tensor, sigma:float,base_cometric:CoMetric,reg_coef:float=1e-3):
+        super().__init__()
+        self.c = c
+        self.sigma = sigma
+        self.reg_coef = reg_coef
+        self.base_cometric = base_cometric
+        self.g_inv_c = self.base_cometric(self.c) # (K,d,d)
+
+
+    def forward(self,q):
+        c_dist = torch.cdist(q,self.c) # (B,K)
+        weights = torch.exp(-c_dist**2/(2*self.sigma**2))
+        g_inv = torch.einsum('bk,kij->bij',weights,self.g_inv_c)
+        return g_inv + self.reg_coef*self.eye(q)
