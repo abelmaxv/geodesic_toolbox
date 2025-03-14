@@ -114,7 +114,7 @@ class ShootingSolver(GeodesicDistanceSolver):
         convergence_threshold: float = None,
         time_scaling_schedule: Callable[[float], float] = cosine_time_scaling_schedule,
         scale_lr: bool = True,
-        verbose:bool = False,
+        verbose: bool = False,
     ) -> None:
 
         super().__init__(cometric=cometric)
@@ -912,18 +912,26 @@ class SolverGraph(GeodesicDistanceSolver):
         The number of neighbors to use
     dt : float
         The time step to use for the linear interpolation
+    batch_size : int
+        The size of the batch to use for the computation of the graph
     """
 
     def __init__(
-        self, cometric: CoMetric, data: torch.Tensor, n_neighbors: int, dt: float = 0.01
+        self,
+        cometric: CoMetric,
+        data: torch.Tensor,
+        n_neighbors: int,
+        dt: float = 0.01,
+        batch_size: int = 64,
     ) -> None:
         super().__init__(cometric)
         self.data = data
         self.n_neighbors = n_neighbors
         self.dt = dt
         self.T = int(1 / self.dt)
+        self.b_size = batch_size
 
-        self.W, self.knn = self.init_knn_graph(data, n_neighbors)
+        self.W, self.knn = self.init_knn_graph(data, n_neighbors, batch_size)
         self.predecessors = self.get_predecessors()
 
     def init_knn_graph(
@@ -949,12 +957,12 @@ class SolverGraph(GeodesicDistanceSolver):
         """
         # We add one to the number of neighbors to remove the point itself
         knn = NearestNeighbors(n_neighbors=n_neighbors + 1, algorithm="ball_tree")
-        knn.fit(data)
-        t = torch.arange(0, 1, self.dt).view(1, 1, -1, 1)
+        knn.fit(data.cpu())
+        t = torch.arange(0, 1, self.dt, device=data.device).view(1, 1, -1, 1)
 
         # Find the Euclidean kNN
         N_data = data.shape[0]
-        _, indices = knn.kneighbors(data)
+        _, indices = knn.kneighbors(data.cpu())
         indices = indices[:, 1:]  # Remove the point itself
         Weight_matrix = np.zeros((N_data, N_data))
 
@@ -975,7 +983,7 @@ class SolverGraph(GeodesicDistanceSolver):
                 linear_traj = rearrange(linear_traj, "b k T d -> (b k) T d")
                 curve_length = self.compute_distance(linear_traj)
                 curve_length = rearrange(curve_length, "(b k) -> b k", b=batch_idx.shape[0])
-                Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length
+                Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length.cpu()
 
         W = 0.5 * (Weight_matrix + Weight_matrix.T)
         return W, knn
@@ -999,10 +1007,12 @@ class SolverGraph(GeodesicDistanceSolver):
         return S
 
     def get_predecessors(self) -> torch.Tensor:
-        """Get the predecessors for the shortest path computation"""
+        """Get the predecessors for the shortest path computation..."""
+        print("Computing predecessors...")
         dst_matrix, predecessors = shortest_path(
             csr_matrix(self.W), directed=False, return_predecessors=True
         )
+        print("Done.")
         return torch.from_numpy(predecessors)
 
     def linear_interpolation(self, p_i, p_j, t):
@@ -1051,8 +1061,8 @@ class SolverGraph(GeodesicDistanceSolver):
         B = q0.shape[0]
 
         # Get the indices of the closest points in the graph
-        _, ind0 = self.knn.kneighbors(q0)
-        _, ind1 = self.knn.kneighbors(q1)
+        _, ind0 = self.knn.kneighbors(q0.detach().cpu())
+        _, ind1 = self.knn.kneighbors(q1.detach().cpu())
 
         if euclidean_only:
             closest_q0 = torch.from_numpy(ind0[:, 0])
@@ -1063,15 +1073,17 @@ class SolverGraph(GeodesicDistanceSolver):
         ind0 = ind0[:, :-1]  # (B,K)
         ind1 = ind1[:, :-1]
 
-        q0_neighbors = torch.zeros(B, self.n_neighbors, self.data.shape[1])  # (B,K,D)
-        q1_neighbors = torch.zeros(B, self.n_neighbors, self.data.shape[1])
+        q0_neighbors = torch.zeros(
+            B, self.n_neighbors, self.data.shape[1], device=q0.device
+        )  # (B,K,D)
+        q1_neighbors = torch.zeros(B, self.n_neighbors, self.data.shape[1], device=q0.device)
 
         for n in range(self.n_neighbors):
             q0_neighbors[:, n, :] = self.data[ind0[:, n]]
             q1_neighbors[:, n, :] = self.data[ind1[:, n]]
 
         # Find the points with the closest metric distance to q0 and q1
-        t = torch.arange(0, 1, self.dt)
+        t = torch.arange(0, 1, self.dt, device=q0.device)
 
         closest_q0 = torch.zeros(B).int()
         closest_q1 = torch.zeros(B).int()
@@ -1184,12 +1196,12 @@ class SolverGraph(GeodesicDistanceSolver):
         start_idx, end_idx = self.connect_to_graph(q0, q1, euclidean_only=connect_euclidean)
         path_idx = self.get_path_idx(start_idx, end_idx)
 
-        pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1])
+        pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1], device=q0.device)
         for b in range(q0.shape[0]):
             pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b])
 
         # pts_on_traj = self.get_pts_from_idx(start_idx, path_idx)
-        # pts_on_traj = torch.cat([q1[:, None, :], pts_on_traj, q0[:, None, :]], dim=1)
+        pts_on_traj = torch.cat([q1[:, None, :], pts_on_traj, q0[:, None, :]], dim=1)
 
         # Reverse end->start to start->end
         pts_on_traj = pts_on_traj.flip(1)
@@ -1236,9 +1248,9 @@ class SolverGraph(GeodesicDistanceSolver):
             traj_q = traj_q.unfold(0, 3, 1).mean(dim=2)
 
         # Resample the curve
-        cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q)
+        cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q.cpu())
         traj_q = cs(np.arange(0, 1, self.dt))
-        traj_q = torch.from_numpy(traj_q).float()
+        traj_q = torch.from_numpy(traj_q).float().to(q0.device)
         return traj_q
 
 
