@@ -666,7 +666,7 @@ class FisherRaoCometric(CoMetric):
         return torch.linalg.inv(g)
 
 
-class KernelMetric(CoMetric):
+class KernelCometric(CoMetric):
     """
     Construct a smooth cometric tensor by the evaluation of the cometric at 
     given keypoints.
