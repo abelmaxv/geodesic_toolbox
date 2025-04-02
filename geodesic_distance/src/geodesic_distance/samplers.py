@@ -415,7 +415,10 @@ class HMCSampler(Sampler):
             beta_k_minus_1_sqrt = beta_k_sqrt
         return z_new, v_new
 
-    def sample(self, z_0: Tensor, return_traj=False) -> Tensor:
+    @torch.no_grad()
+    def sample(
+        self, z_0: Tensor, return_traj=False, progress=False
+    ) -> Tensor | tuple[Tensor, float]:
         """
         Given an initial sample z_0, it returns a new sample from the target distribution.
 
@@ -424,23 +427,30 @@ class HMCSampler(Sampler):
         z_0 : Tensor (b,d)
             The initial sample.
         return_traj : bool
-            If True, it returns the trajectory of the samples.
+            If True, it returns the trajectory of the samples aswell as the acceptance rate.
+        progress : bool
+            If True, it shows a progress bar when sampling.
 
         Returns
         -------
         Tensor (b,d)
             The new samples.
         or
-        Tensor (b,N_run,d)
-            The trajectory of the samples. The initial sample is the first element.
+        (Tensor (b,N_run,d) , float)
+            The trajectory of the samples (the initial sample is the first element) and the acceptance rate.
         """
-
+        accepted_samples = 0
         z = z_0.clone()
 
         if return_traj:
             traj = [z.clone()]
 
-        for k in range(self.N_run):
+        if progress:
+            pbar = tqdm(range(self.N_run), desc="Sampling", unit="steps")
+        else:
+            pbar = range(self.N_run)
+
+        for k in pbar:
             v_0 = torch.randn_like(z)
             try:
                 z_l, v_l = self.leapfrog(z, v_0)
@@ -457,6 +467,7 @@ class HMCSampler(Sampler):
                 u = torch.rand_like(alpha)
                 mask = alpha >= u
                 z = torch.where(mask[:, None], z_l, z)
+                accepted_samples += mask.sum().item()
             else:
                 z = z_l
 
@@ -464,7 +475,10 @@ class HMCSampler(Sampler):
                 traj.append(z.clone())
 
         if return_traj:
-            return torch.stack(traj, dim=1)
+            traj = torch.stack(traj, dim=1)
+            if not self.skip_acceptance:
+                acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
+                return traj, acceptance_rate
         else:
             return z
 
