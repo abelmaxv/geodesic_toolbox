@@ -348,6 +348,7 @@ class HMCSampler(Sampler):
         self.beta_0_sqrt = beta_0**0.5
         self.skip_acceptance = skip_acceptance
 
+        # @TODO : make this faster
         self._grad_U = torch.func.jacrev(self.U)
         self.grad_U = lambda z: self._grad_U(z).sum(1)
 
@@ -359,7 +360,7 @@ class HMCSampler(Sampler):
         return -torch.log(self.p_target(z))
 
     def K(self, v: Tensor) -> Tensor:
-        return torch.einsum("bi,bj->b", v, v)  # v^T @ v
+        return 1 / 2 * torch.einsum("bi,bi->b", v, v)  # v^T @ v
 
     def H(self, z: Tensor, v: Tensor) -> Tensor:
         return self.U(z) + self.K(v)

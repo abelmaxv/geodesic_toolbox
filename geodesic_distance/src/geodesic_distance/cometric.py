@@ -669,7 +669,11 @@ class FisherRaoCometric(CoMetric):
 class KernelCometric(CoMetric):
     """
     Construct a smooth cometric tensor by the evaluation of the cometric at 
-    given keypoints.
+    given keypoints. ie:
+    G(q) = sum_{i=1}^K w_i(q) G(c_i) + reg_coef * Id
+    where G(c_i) is the cometric tensor at the keypoint c_i
+    and w_i(q) = exp(-||q-c_i||^2/(2*sigma^2)) is the weight of the keypoint c_i
+    and sigma is the bandwidth of the kernel.
 
     Parameters
     ----------
