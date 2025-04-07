@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 import torch.nn as nn
+from sklearn.cluster import KMeans
 
 
 def SoftAbs(M, alpha=1e3):
@@ -668,35 +669,98 @@ class FisherRaoCometric(CoMetric):
 
 class KernelCometric(CoMetric):
     """
-    Construct a smooth cometric tensor by the evaluation of the cometric at 
+    Construct a smooth cometric tensor by the evaluation of the cometric at
     given keypoints. ie:
     G(q) = sum_{i=1}^K w_i(q) G(c_i) + reg_coef * Id
     where G(c_i) is the cometric tensor at the keypoint c_i
-    and w_i(q) = exp(-||q-c_i||^2/(2*sigma^2)) is the weight of the keypoint c_i
+    and w_i(q) = exp(- lambda_i ||q-c_i||^2) is the weight of the keypoint c_i
     and sigma is the bandwidth of the kernel.
+
+    THe keypoints can be computed using KMeans clustering on the input data.
 
     Parameters
     ----------
     c : torch.Tensor (K,d)
         The keypoints
-    sigma : float
-        The bandwidth of the kernel
     base_cometric : CoMetric
         The base cometric tensor. It will only be evaluated once at the keypoints.
+    a : float
+        The curvature parameter. It is used to compute the bandwidth of the kernel.
     reg_coef : float
         Regularization coefficient for the cometric
+    use_knn : bool
+        If True, the keypoints are computed using KMeans clustering on the input data.
+        Otherwise, the keypoints are the input data itself.
+    n_neighbors : int
+        The number of keypoints to compute. If use_knn is True, this is the number of clusters.
+        Otherwise, this is ignored.
     """
-    def __init__(self, c:Tensor, sigma:float,base_cometric:CoMetric,reg_coef:float=1e-3):
+
+    def __init__(
+        self,
+        c: Tensor,
+        base_cometric: CoMetric,
+        a: float = 1.0,
+        reg_coef: float = 1e-3,
+        use_knn: bool = False,
+        n_neighbors: int = 128,
+    ):
         super().__init__()
-        self.c = c
-        self.sigma = sigma
         self.reg_coef = reg_coef
         self.base_cometric = base_cometric
-        self.g_inv_c = self.base_cometric(self.c) # (K,d,d)
+        self.K = n_neighbors
+        self.a = a
 
+        self.register_buffer("c", torch.zeros(self.K, c.size(1)))
+        self.register_buffer("bandwidth", torch.ones(self.K))
+        bandwdith, c = self.get_bandwidth_and_centers_(c, use_knn)
+        self.check_bandwidth_and_centers_(bandwdith, c)
+        self.bandwidth = bandwdith
+        self.c = c
 
-    def forward(self,q):
-        c_dist = torch.cdist(q,self.c) # (B,K)
-        weights = torch.exp(-c_dist**2/(2*self.sigma**2))
-        g_inv = torch.einsum('bk,kij->bij',weights,self.g_inv_c)
-        return g_inv + self.reg_coef*self.eye(q)
+        self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
+
+    def get_bandwidth_and_centers_(self, embeds: Tensor, use_knn) -> tuple[Tensor, Tensor]:
+
+        if not use_knn:
+            self.K = embeds.shape[0]
+            centers = embeds
+            bandwidth = torch.ones(self.K) * self.a
+            return bandwidth, centers
+
+        kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds.cpu())
+        c = kmeans.cluster_centers_
+        labels = kmeans.labels_
+
+        bandwidth = torch.ones(self.K)
+        # Compute the average distances to the cluster centers per clusters
+        for k in range(self.K):
+            idx_in_cluster = labels == k
+            z_in_cluster = embeds[idx_in_cluster]
+            if z_in_cluster.shape[0] <= 1:
+                bandwidth[k] = 0.0
+                continue
+            dist = torch.linalg.vector_norm(z_in_cluster - c[k], dim=1)
+            sigma = self.a * dist.mean() * 1.25  # scale by a factor to smooth the metric
+            lbd_k = 0.5 / sigma**2
+            bandwidth[k] = lbd_k
+        return bandwidth, torch.from_numpy(c).to(torch.float32)
+
+    def check_bandwidth_and_centers_(
+        self, bandwidth: Tensor, centers: Tensor, cutoff=0.1
+    ) -> None:
+        zero_clusters = (bandwidth == 0.0).sum()
+        ratio_zero_clusters = zero_clusters / self.K
+        if ratio_zero_clusters > cutoff:
+            print(f"WARNING: {ratio_zero_clusters:.2f}% of the clusters have no samples.")
+            print("This might lead to numerical instability.")
+            print(
+                "Consider either increasing the curvature parameter `a` or decreasing the number of clusters `K`."
+            )
+
+    def forward(self, q):
+        weights = torch.cdist(q, self.c).pow(2)  # (B,K)
+        weights = torch.exp(-self.bandwidth * weights)
+        g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
+        g_inv += self.reg_coef * self.eye(q)
+        return g_inv
