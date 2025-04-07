@@ -87,7 +87,7 @@ def scaled_euclidean_dst(
     return scale.sqrt() * torch.linalg.vector_norm(u - v, dim=-1)
 
 
-def get_bounds(embeddings: torch.Tensor) -> torch.Tensor:
+def get_bounds(embeddings: torch.Tensor,margin:float=0.) -> torch.Tensor:
     """
     Compute the bounds of the embeddings.
 
@@ -95,6 +95,9 @@ def get_bounds(embeddings: torch.Tensor) -> torch.Tensor:
     ----------
     embeddings : torch.Tensor (n_points, 2)
         The embeddings of the points.
+    margin : float
+        Margin scaling factor to add to the bounds. (default is 0)
+        This is useful to avoid points being too close to the edges of the plot.
 
     Returns:
     -------
@@ -103,6 +106,15 @@ def get_bounds(embeddings: torch.Tensor) -> torch.Tensor:
     """
     min_x, max_x = embeddings[:, 0].min(), embeddings[:, 0].max()
     min_y, max_y = embeddings[:, 1].min(), embeddings[:, 1].max()
+    # Add margin to the bounds
+    min_x -= margin * (max_x - min_x)
+    max_x += margin * (max_x - min_x)
+    min_y -= margin * (max_y - min_y)
+    max_y += margin * (max_y - min_y)
+    # Ensure the bounds are in the correct order
+    min_x, max_x = min(min_x, max_x), max(min_x, max_x)
+    min_y, max_y = min(min_y, max_y), max(min_y, max_y)
+    # Create a tensor with the bounds
     bounds = [min_x, max_x, min_y, max_y]
     bounds = torch.tensor(bounds)
     return bounds
