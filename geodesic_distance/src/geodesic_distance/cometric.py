@@ -713,7 +713,8 @@ class KernelCometric(CoMetric):
 
         self.register_buffer("c", torch.zeros(self.K, c.size(1)))
         self.register_buffer("bandwidth", torch.ones(self.K))
-        bandwdith, c = self.get_bandwidth_and_centers_(c, use_knn)
+        self.register_buffer("g_inv_c", self.eye(c))
+        bandwdith, c = self.get_bandwidth_and_centers_(c.cpu(), use_knn)
         self.check_bandwidth_and_centers_(bandwdith, c)
         self.bandwidth = bandwdith
         self.c = c
@@ -728,7 +729,7 @@ class KernelCometric(CoMetric):
             bandwidth = torch.ones(self.K) * self.a
             return bandwidth, centers
 
-        kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds.cpu())
+        kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
         c = kmeans.cluster_centers_
         labels = kmeans.labels_
 
@@ -752,7 +753,7 @@ class KernelCometric(CoMetric):
         zero_clusters = (bandwidth == 0.0).sum()
         ratio_zero_clusters = zero_clusters / self.K
         if ratio_zero_clusters > cutoff:
-            print(f"WARNING: {ratio_zero_clusters:.2f}% of the clusters have no samples.")
+            print(f"WARNING: {ratio_zero_clusters:.2f}% ({zero_clusters}/{self.K}) of the clusters have no samples.")
             print("This might lead to numerical instability.")
             print(
                 "Consider either increasing the curvature parameter `a` or decreasing the number of clusters `K`."
