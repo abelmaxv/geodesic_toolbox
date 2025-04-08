@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 from sklearn.cluster import KMeans
+import numpy as np
 
 
 def SoftAbs(M, alpha=1e3):
@@ -726,13 +727,29 @@ class KernelCometric(CoMetric):
         if not use_knn:
             self.K = embeds.shape[0]
             centers = embeds
-            bandwidth = torch.ones(self.K) * self.a
+            bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
             return bandwidth, centers
 
         kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
         c = kmeans.cluster_centers_
         labels = kmeans.labels_
 
+        # Filter the clusters
+        unique, counts = np.unique(labels, return_counts=True)
+        mean_per_cluster, std = counts.mean(), counts.std()
+        # Keep only the cluster with more than mean_per_cluster - std
+        to_keep = unique[counts > mean_per_cluster - std]
+        c = c[to_keep]
+        self.K = c.shape[0]
+        # Constant bandwidth
+        bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
+
+        # bandwidth = self.adjust_bandwidth(embeds, c, labels)
+
+        return bandwidth, torch.from_numpy(c).to(torch.float32)
+
+    def adjust_bandwidth(self, embeds, c, labels):
+        """Compute the bandwidth as the covariance of the points in each cluster."""
         bandwidth = torch.ones(self.K)
         # Compute the average distances to the cluster centers per clusters
         for k in range(self.K):
@@ -745,7 +762,7 @@ class KernelCometric(CoMetric):
             sigma = self.a * dist.mean() * 1.25  # scale by a factor to smooth the metric
             lbd_k = 0.5 / sigma**2
             bandwidth[k] = lbd_k
-        return bandwidth, torch.from_numpy(c).to(torch.float32)
+        return bandwidth
 
     def check_bandwidth_and_centers_(
         self, bandwidth: Tensor, centers: Tensor, cutoff=0.1
@@ -753,7 +770,9 @@ class KernelCometric(CoMetric):
         zero_clusters = (bandwidth == 0.0).sum()
         ratio_zero_clusters = zero_clusters / self.K
         if ratio_zero_clusters > cutoff:
-            print(f"WARNING: {ratio_zero_clusters:.2f}% ({zero_clusters}/{self.K}) of the clusters have no samples.")
+            print(
+                f"WARNING: {ratio_zero_clusters:.2f}% ({zero_clusters}/{self.K}) of the clusters have no samples."
+            )
             print("This might lead to numerical instability.")
             print(
                 "Consider either increasing the curvature parameter `a` or decreasing the number of clusters `K`."
