@@ -475,6 +475,9 @@ class HMCSampler(Sampler):
             if return_traj:
                 traj.append(z.clone())
 
+            if progress:
+                pbar.set_postfix({"acceptance_rate": accepted_samples / ((k + 1) * z_0.shape[0])})
+
         if return_traj:
             traj = torch.stack(traj, dim=1)
             if not self.skip_acceptance:
