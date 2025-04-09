@@ -5,6 +5,59 @@ from sklearn.cluster import KMeans
 import numpy as np
 
 
+def empirical_cov_mat(x: Tensor, mu: Tensor = None, eps=1e-6):
+    """Computes the empirical covariance matrix of the data x.
+    If mu is provided, the covariance is computed with respect to mu.
+    Else the covariance is computed with respect to the mean of x.
+
+    Parameters
+    ----------
+    x : Tensor (N,d)
+        The data.
+    mu : Tensor (d,)
+        The mean of the data.
+    eps : float
+        A small value to add to the diagonal for numerical stability.
+
+    Returns
+    -------
+    cov : Tensor (d,d)
+        The covariance matrix.
+    """
+    if mu is None:
+        mu = x.mean(dim=0)
+    cov = (x - mu).T @ (x - mu) / (x.shape[0] - 1)
+    cov += eps * torch.eye(x.shape[1], device=x.device)
+    return cov
+
+
+def empirical_diag_cov_mat(x: Tensor, mu: Tensor = None, eps: float = 1e-6):
+    """Computes the empirical covariance matrix of the data x.
+    The matrix is here diagonal.
+    If mu is provided, the covariance is computed with respect to mu.
+    Else the covariance is computed with respect to the mean of x.
+
+    Parameters
+    ----------
+    x : Tensor (N,d)
+        The data.
+    mu : Tensor (d,)
+        The mean of the data.
+    eps : float
+        A small value to add to the diagonal for numerical stability.
+
+    Returns
+    -------
+    cov : Tensor (d,d)
+        The covariance matrix.
+    """
+    if mu is None:
+        mu = x.mean(1)
+    var = torch.linalg.vector_norm(x - mu, dim=1).mean()
+    cov = (var + eps) * torch.eye(x.shape[1], device=x.device)
+    return cov
+
+
 def SoftAbs(M, alpha=1e3):
     """
     SoftAbs regularisation of a matrix M. It is used to ensure that the matrix is positive definite.
@@ -695,6 +748,8 @@ class KernelCometric(CoMetric):
     n_neighbors : int
         The number of keypoints to compute. If use_knn is True, this is the number of clusters.
         Otherwise, this is ignored.
+    adaptative_std: bool
+        If True, compute the bandwidth as intra cluster variance. Else Sigma = 1/a**2 * Id
     """
 
     def __init__(
@@ -705,12 +760,14 @@ class KernelCometric(CoMetric):
         reg_coef: float = 1e-3,
         use_knn: bool = False,
         n_neighbors: int = 128,
+        adaptative_std: bool = True,
     ):
         super().__init__()
         self.reg_coef = reg_coef
         self.base_cometric = base_cometric
         self.K = n_neighbors
         self.a = a
+        self.adaptative_std = adaptative_std
 
         self.register_buffer("c", torch.zeros(self.K, c.size(1)))
         self.register_buffer("bandwidth", torch.ones(self.K))
@@ -722,29 +779,39 @@ class KernelCometric(CoMetric):
 
         self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
 
-    def get_bandwidth_and_centers_(self, embeds: Tensor, use_knn) -> tuple[Tensor, Tensor]:
+    def get_bandwidth_and_centers_(
+        self, embeds: Tensor, use_knn, min_per_cluster: int = 5
+    ) -> tuple[Tensor, Tensor]:
 
         if not use_knn:
             self.K = embeds.shape[0]
             centers = embeds
-            bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
-            return bandwidth, centers
+            Sigma = 1 / 2 * torch.eye(embeds.shape[1]).expand(self.K, -1, -1) / self.a**2
+            return Sigma, centers
 
         kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
         c = kmeans.cluster_centers_
         labels = kmeans.labels_
 
         # Filter the clusters
-        unique, counts = np.unique(labels, return_counts=True)
-        mean_per_cluster, std = counts.mean(), counts.std()
-        # Keep only the cluster with more than mean_per_cluster - std
-        to_keep = unique[counts > mean_per_cluster - std]
-        c = c[to_keep]
-        self.K = c.shape[0]
-        # Constant bandwidth
-        bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
+        if self.K > 3:
+            unique, counts = np.unique(labels, return_counts=True)
+            mean_per_cluster, std = counts.mean(), counts.std()
+            # Keep only the cluster with enough samples
+            to_keep = unique[
+                (counts > mean_per_cluster - 2 * std) & (counts > min_per_cluster)
+            ]
+            c = c[to_keep]
+            self.K = c.shape[0]
+        # Remap labels to 0,K-1
+        mapping_dict = {i: j for i, j in zip(to_keep, range(self.K))}
+        labels = np.array([mapping_dict[i] if i in mapping_dict else -1 for i in labels])
 
-        # bandwidth = self.adjust_bandwidth(embeds, c, labels)
+        if not self.adaptative_std:
+            # Constant bandwidth
+            bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
+        else:
+            bandwidth = self.adjust_bandwidth(embeds, c, labels)
 
         return bandwidth, torch.from_numpy(c).to(torch.float32)
 
@@ -759,7 +826,7 @@ class KernelCometric(CoMetric):
                 bandwidth[k] = 0.0
                 continue
             dist = torch.linalg.vector_norm(z_in_cluster - c[k], dim=1)
-            sigma = self.a * dist.mean() * 1.25  # scale by a factor to smooth the metric
+            sigma = self.a * dist.mean() * 3.0  # scale by a factor to smooth the metric
             lbd_k = 0.5 / sigma**2
             bandwidth[k] = lbd_k
         return bandwidth
@@ -781,6 +848,124 @@ class KernelCometric(CoMetric):
     def forward(self, q):
         weights = torch.cdist(q, self.c).pow(2)  # (B,K)
         weights = torch.exp(-self.bandwidth * weights)
+        g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
+        g_inv += self.reg_coef * self.eye(q)
+        return g_inv
+
+
+class CovKernelCometric(CoMetric):
+    """
+    Construct a smooth cometric tensor by the evaluation of the cometric at
+    given keypoints. ie:
+    G(q) = sum_{i=1}^K w_i(q) G(c_i) + reg_coef * Id
+    where G(c_i) is the cometric tensor at the keypoint c_i
+    and w_i(q) = exp(- 1/2 * (q-c_i)^T Sigma_k (q-c_i))
+    where Sigma_k is the local covariance matrix at the keypoint c_i
+
+    The keypoints can be computed using KMeans clustering on the input data.
+
+    Note : when n_neighbors is big, cluster will be sparse resulting in a
+    degenerate empirical covariance and thus a wacky cometric. Keep
+    this number small.
+
+    Parameters
+    ----------
+    c : torch.Tensor (K,d)
+        The keypoints
+    base_cometric : CoMetric
+        The base cometric tensor. It will only be evaluated once at the keypoints.
+    a : float
+        The curvature parameter. It is used to compute the bandwidth of the kernel.
+    reg_coef : float
+        Regularization coefficient for the cometric
+    use_knn : bool
+        If True, the keypoints are computed using KMeans clustering on the input data.
+        Otherwise, the keypoints are the input data itself.
+    n_neighbors : int
+        The number of keypoints to compute. If use_knn is True, this is the number of clusters.
+        Otherwise, this is ignored.
+    adaptative_std : bool
+        If True, compute the bandwidth as local covariance matrix. Else Sigma = 1/a**2 * Id
+    """
+
+    def __init__(
+        self,
+        c: Tensor,
+        base_cometric: CoMetric,
+        a: float = 1.0,
+        reg_coef: float = 1e-3,
+        use_knn: bool = False,
+        n_neighbors: int = 128,
+        adaptative_std: bool = True,
+    ):
+        super().__init__()
+        self.reg_coef = reg_coef
+        self.base_cometric = base_cometric
+        self.K = n_neighbors
+        self.a = a
+        self.adaptative_std = adaptative_std
+
+        self.register_buffer("c", torch.zeros(self.K, c.size(1)))
+        self.register_buffer("Sigma", torch.eye(c.size(1)).expand(self.K, -1, -1))
+        self.register_buffer("g_inv_c", self.eye(c))
+        Sigma, c = self.get_sigma_and_centers(c.cpu(), use_knn)
+        self.Sigma = Sigma
+        self.c = c
+
+        self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
+
+    def get_sigma_and_centers(
+        self, embeds: Tensor, use_knn, min_per_cluster: int = 5
+    ) -> tuple[Tensor, Tensor]:
+
+        if not use_knn:
+            self.K = embeds.shape[0]
+            centers = embeds
+            Sigma = 1 / 2 * torch.eye(embeds.shape[1]).expand(self.K, -1, -1) / self.a**2
+            return Sigma, centers
+
+        kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
+        c = kmeans.cluster_centers_
+        labels = kmeans.labels_
+
+        # Filter the clusters
+        if self.K > 3:
+            unique, counts = np.unique(labels, return_counts=True)
+            mean_per_cluster, std = counts.mean(), counts.std()
+            # Keep only the cluster with enough samples
+            to_keep = unique[
+                (counts > mean_per_cluster - 2 * std) & (counts > min_per_cluster)
+            ]
+            c = c[to_keep]
+            self.K = c.shape[0]
+            # Remap labels to 0,K-1
+            mapping_dict = {i: j for i, j in zip(to_keep, range(self.K))}
+            labels = np.array([mapping_dict[i] if i in mapping_dict else -1 for i in labels])
+
+        if not self.adaptative_std:
+            Sigma = torch.eye(c.shape[1]).expand(self.K, -1, -1) / self.a**2
+        else:
+            Sigma = self.compute_sigma(embeds, c, labels)
+
+        return Sigma, torch.from_numpy(c).to(torch.float32)
+
+    def compute_sigma(self, embeds, c, labels):
+        """Compute the bandwidth as the covariance of the points in each cluster."""
+        Sigma = torch.zeros(self.K, embeds.shape[1], embeds.shape[1])
+        # Compute the average distances to the cluster centers per clusters
+        for k in range(self.K):
+            idx_in_cluster = labels == k
+            z_in_cluster = embeds[idx_in_cluster]
+            local_cov = empirical_cov_mat(z_in_cluster, mu=c[k])
+            # local_cov = empirical_diag_cov_mat(z_in_cluster, mu=c[k])
+            local_cov = local_cov * self.a**2 * 2.5  # Scale by a factor to smooth
+            Sigma[k] = local_cov.inverse()
+        return Sigma
+
+    def forward(self, q):
+        dx = q[:, None, :] - self.c[None, :, :]  # (B,K,d)
+        weights = torch.einsum("bki, kij, bki -> bk", dx, self.Sigma, dx)  # dx^T@Sigma@dx
+        weights = torch.exp(-0.5 * weights)  # (B,K)
         g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
         g_inv += self.reg_coef * self.eye(q)
         return g_inv
