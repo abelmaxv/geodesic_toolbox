@@ -87,7 +87,7 @@ def scaled_euclidean_dst(
     return scale.sqrt() * torch.linalg.vector_norm(u - v, dim=-1)
 
 
-def get_bounds(embeddings: torch.Tensor,margin:float=0.) -> torch.Tensor:
+def get_bounds(embeddings: torch.Tensor, margin: float = 0.0) -> torch.Tensor:
     """
     Compute the bounds of the embeddings.
 
