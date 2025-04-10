@@ -786,8 +786,8 @@ class KernelCometric(CoMetric):
         if not use_knn:
             self.K = embeds.shape[0]
             centers = embeds
-            Sigma = 1 / 2 * torch.eye(embeds.shape[1]).expand(self.K, -1, -1) / self.a**2
-            return Sigma, centers
+            bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
+            return bandwidth, centers
 
         kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
         c = kmeans.cluster_centers_
