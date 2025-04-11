@@ -418,7 +418,7 @@ class HMCSampler(Sampler):
 
     @torch.no_grad()
     def sample(
-        self, z_0: Tensor, return_traj=False, progress=False
+        self, z_0: Tensor, return_traj=False, progress=False, return_acceptance=False
     ) -> Tensor | tuple[Tensor, float]:
         """
         Given an initial sample z_0, it returns a new sample from the target distribution.
@@ -431,6 +431,8 @@ class HMCSampler(Sampler):
             If True, it returns the trajectory of the samples aswell as the acceptance rate.
         progress : bool
             If True, it shows a progress bar when sampling.
+        return_acceptance : bool
+            If True, it returns the sample aswell as the acceptance rate.
 
         Returns
         -------
@@ -439,6 +441,9 @@ class HMCSampler(Sampler):
         or
         (Tensor (b,N_run,d) , float)
             The trajectory of the samples (the initial sample is the first element) and the acceptance rate.
+        or
+        (Tensor (b,d), float)
+            The new samples and the acceptance rate.
         """
         accepted_samples = 0
         z = z_0.clone()
@@ -483,6 +488,9 @@ class HMCSampler(Sampler):
             if not self.skip_acceptance:
                 acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
                 return traj, acceptance_rate
+        if return_acceptance:
+            acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
+            return z, acceptance_rate
         else:
             return z
 
