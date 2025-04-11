@@ -756,7 +756,7 @@ class KernelCometric(CoMetric):
         self,
         c: Tensor,
         base_cometric: CoMetric,
-        a: float = 1.0,
+        a: float = 0.5,
         reg_coef: float = 1e-3,
         use_knn: bool = False,
         n_neighbors: int = 128,
@@ -767,6 +767,8 @@ class KernelCometric(CoMetric):
         self.base_cometric = base_cometric
         self.K = n_neighbors
         self.a = a
+        self.dim = c.size(1)
+        self.sqrt_d = torch.sqrt(torch.tensor(self.dim, dtype=c.dtype))
         self.adaptative_std = adaptative_std
 
         self.register_buffer("c", torch.zeros(self.K, c.size(1)))
@@ -775,6 +777,7 @@ class KernelCometric(CoMetric):
         bandwdith, c = self.get_bandwidth_and_centers_(c.cpu(), use_knn)
         self.check_bandwidth_and_centers_(bandwdith, c)
         self.bandwidth = bandwdith
+        print(f"Bandwidth: {self.bandwidth}")
         self.c = c
 
         self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
@@ -786,7 +789,7 @@ class KernelCometric(CoMetric):
         if not use_knn:
             self.K = embeds.shape[0]
             centers = embeds
-            bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
+            bandwidth = 1 / 2 * torch.ones(self.K) / (self.a / self.sqrt_d) ** 2
             return bandwidth, centers
 
         kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
@@ -809,7 +812,7 @@ class KernelCometric(CoMetric):
 
         if not self.adaptative_std:
             # Constant bandwidth
-            bandwidth = 1 / 2 * torch.ones(self.K) / self.a**2
+            bandwidth = 1 / 2 * torch.ones(self.K) / (self.a / self.sqrt_d) ** 2
         else:
             bandwidth = self.adjust_bandwidth(embeds, c, labels)
 
@@ -826,7 +829,9 @@ class KernelCometric(CoMetric):
                 bandwidth[k] = 0.0
                 continue
             dist = torch.linalg.vector_norm(z_in_cluster - c[k], dim=1)
-            sigma = self.a * dist.mean() * 3.0  # scale by a factor to smooth the metric
+            sigma = (
+                (self.a / self.sqrt_d) * dist.mean() * 3.0
+            )  # scale by a factor to smooth the metric
             lbd_k = 0.5 / sigma**2
             bandwidth[k] = lbd_k
         return bandwidth
@@ -903,6 +908,8 @@ class CovKernelCometric(CoMetric):
         self.base_cometric = base_cometric
         self.K = n_neighbors
         self.a = a
+        self.dim = c.size(1)
+        self.sqrt_d = torch.sqrt(torch.tensor(self.dim, dtype=c.dtype))
         self.adaptative_std = adaptative_std
 
         self.register_buffer("c", torch.zeros(self.K, c.size(1)))
@@ -921,7 +928,7 @@ class CovKernelCometric(CoMetric):
         if not use_knn:
             self.K = embeds.shape[0]
             centers = embeds
-            Sigma = 1 / 2 * torch.eye(embeds.shape[1]).expand(self.K, -1, -1) / self.a**2
+            Sigma = 1 / 2 * torch.eye(embeds.shape[1]).expand(self.K, -1, -1) / (self.a/self.sqrt_d) ** 2
             return Sigma, centers
 
         kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
@@ -943,7 +950,7 @@ class CovKernelCometric(CoMetric):
             labels = np.array([mapping_dict[i] if i in mapping_dict else -1 for i in labels])
 
         if not self.adaptative_std:
-            Sigma = torch.eye(c.shape[1]).expand(self.K, -1, -1) / self.a**2
+            Sigma = torch.eye(c.shape[1]).expand(self.K, -1, -1) / (self.a/self.sqrt_d)**2
         else:
             Sigma = self.compute_sigma(embeds, c, labels)
 
@@ -958,7 +965,7 @@ class CovKernelCometric(CoMetric):
             z_in_cluster = embeds[idx_in_cluster]
             local_cov = empirical_cov_mat(z_in_cluster, mu=c[k])
             # local_cov = empirical_diag_cov_mat(z_in_cluster, mu=c[k])
-            local_cov = local_cov * self.a**2 * 2.5  # Scale by a factor to smooth
+            local_cov = local_cov * (self.a/self.sqrt_d)**2 * 2.5  # Scale by a factor to smooth
             Sigma[k] = local_cov.inverse()
         return Sigma
 
