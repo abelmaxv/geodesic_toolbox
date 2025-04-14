@@ -163,7 +163,7 @@ class CoMetric(torch.nn.Module):
         """
         B, dim = x.shape
         id = torch.eye(dim, dtype=x.dtype, device=x.device).unsqueeze(0)
-        id = id.expand(B, -1, -1)
+        id = id.repeat(B, 1, 1)
         return id
 
 
@@ -775,9 +775,8 @@ class KernelCometric(CoMetric):
         self.register_buffer("bandwidth", torch.ones(self.K))
         self.register_buffer("g_inv_c", self.eye(c))
         bandwdith, c = self.get_bandwidth_and_centers_(c.cpu(), use_knn)
-        self.check_bandwidth_and_centers_(bandwdith, c)
+        self.check_bandwidth_and_centers_(bandwdith)
         self.bandwidth = bandwdith
-        print(f"Bandwidth: {self.bandwidth}")
         self.c = c
 
         self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
@@ -814,31 +813,40 @@ class KernelCometric(CoMetric):
             # Constant bandwidth
             bandwidth = 1 / 2 * torch.ones(self.K) / (self.a / self.sqrt_d) ** 2
         else:
-            bandwidth = self.adjust_bandwidth(embeds, c, labels)
+            bandwidth = self.adjust_bandwidth(torch.from_numpy(c).to(torch.float32))
 
         return bandwidth, torch.from_numpy(c).to(torch.float32)
 
-    def adjust_bandwidth(self, embeds, c, labels):
-        """Compute the bandwidth as the covariance of the points in each cluster."""
-        bandwidth = torch.ones(self.K)
-        # Compute the average distances to the cluster centers per clusters
-        for k in range(self.K):
-            idx_in_cluster = labels == k
-            z_in_cluster = embeds[idx_in_cluster]
-            if z_in_cluster.shape[0] <= 1:
-                bandwidth[k] = 0.0
-                continue
-            dist = torch.linalg.vector_norm(z_in_cluster - c[k], dim=1)
-            sigma = (
-                (self.a / self.sqrt_d) * dist.mean() * 3.0
-            )  # scale by a factor to smooth the metric
-            lbd_k = 0.5 / sigma**2
-            bandwidth[k] = lbd_k
+        # def adjust_bandwidth(self, embeds, c, labels):
+        #     """Compute the bandwidth as the covariance of the points in each cluster."""
+        #     bandwidth = torch.ones(self.K)
+        #     # Compute the average distances to the cluster centers per clusters
+        #     for k in range(self.K):
+        #         idx_in_cluster = labels == k
+        #         z_in_cluster = embeds[idx_in_cluster]
+        #         if z_in_cluster.shape[0] <= 1:
+        #             bandwidth[k] = 0.0
+        #             continue
+        #         dist = torch.linalg.vector_norm(z_in_cluster - c[k], dim=1)
+        #         sigma = (
+        #             (self.a / self.sqrt_d) * dist.mean() * 3.0
+        #         )  # scale by a factor to smooth the metric
+        #         lbd_k = 0.5 / sigma**2
+        #         bandwidth[k] = lbd_k
         return bandwidth
 
-    def check_bandwidth_and_centers_(
-        self, bandwidth: Tensor, centers: Tensor, cutoff=0.1
-    ) -> None:
+    def adjust_bandwidth(self, c):
+        """Compute the bandwidth as the max distance between two closest clusters."""
+        bandwidth = torch.ones(self.K)
+        dst_mat = torch.cdist(c, c)  # (K,K)
+        # \rho = \max_i\min_{j\neq i} \lVert c_i-c_j\rVert_2
+        dst_mat[dst_mat == 0] = float("inf")
+        rho = dst_mat.min(dim=1).values.max()
+        rho = (self.a / self.sqrt_d) * rho
+        bandwidth = 1 / 2 * torch.ones(self.K) / rho**2
+        return bandwidth
+
+    def check_bandwidth_and_centers_(self, bandwidth: Tensor, cutoff=0.1) -> None:
         zero_clusters = (bandwidth == 0.0).sum()
         ratio_zero_clusters = zero_clusters / self.K
         if ratio_zero_clusters > cutoff:
@@ -862,16 +870,11 @@ class CovKernelCometric(CoMetric):
     """
     Construct a smooth cometric tensor by the evaluation of the cometric at
     given keypoints. ie:
-    G(q) = sum_{i=1}^K w_i(q) G(c_i) + reg_coef * Id
-    where G(c_i) is the cometric tensor at the keypoint c_i
-    and w_i(q) = exp(- 1/2 * (q-c_i)^T Sigma_k (q-c_i))
-    where Sigma_k is the local covariance matrix at the keypoint c_i
-
+    G(q)_inv = sum_{i=1}^K w_i(q) G_inv(c_i) + reg_coef * Id
+    where G_inv(c_i) is the cometric tensor at the keypoint c_i
+    and w_i(q) = exp(- 1/(2*rho**2) * (q-c_i)^T G_inv(c_i) (q-c_i))
+    and rho = a * \sqrt{d} * max_i min_{j neq i} ||c_i-c_j||_2
     The keypoints can be computed using KMeans clustering on the input data.
-
-    Note : when n_neighbors is big, cluster will be sparse resulting in a
-    degenerate empirical covariance and thus a wacky cometric. Keep
-    this number small.
 
     Parameters
     ----------
@@ -889,8 +892,6 @@ class CovKernelCometric(CoMetric):
     n_neighbors : int
         The number of keypoints to compute. If use_knn is True, this is the number of clusters.
         Otherwise, this is ignored.
-    adaptative_std : bool
-        If True, compute the bandwidth as local covariance matrix. Else Sigma = 1/a**2 * Id
     """
 
     def __init__(
@@ -901,7 +902,6 @@ class CovKernelCometric(CoMetric):
         reg_coef: float = 1e-3,
         use_knn: bool = False,
         n_neighbors: int = 128,
-        adaptative_std: bool = True,
     ):
         super().__init__()
         self.reg_coef = reg_coef
@@ -910,26 +910,27 @@ class CovKernelCometric(CoMetric):
         self.a = a
         self.dim = c.size(1)
         self.sqrt_d = torch.sqrt(torch.tensor(self.dim, dtype=c.dtype))
-        self.adaptative_std = adaptative_std
 
         self.register_buffer("c", torch.zeros(self.K, c.size(1)))
-        self.register_buffer("Sigma", torch.eye(c.size(1)).expand(self.K, -1, -1))
         self.register_buffer("g_inv_c", self.eye(c))
-        Sigma, c = self.get_sigma_and_centers(c.cpu(), use_knn)
-        self.Sigma = Sigma
+        print("Getting centers")
+        c = self.get_centers(c.cpu(), use_knn)
         self.c = c
 
-        self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
+        print("Getting rho")
+        self.rho = self.get_rho(c)
+        print("Getting g_inv_c")
+        # self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
+        self.g_inv_c = self.get_g_inv_c(self.c)
 
-    def get_sigma_and_centers(
+    def get_centers(
         self, embeds: Tensor, use_knn, min_per_cluster: int = 5
     ) -> tuple[Tensor, Tensor]:
 
         if not use_knn:
             self.K = embeds.shape[0]
             centers = embeds
-            Sigma = 1 / 2 * torch.eye(embeds.shape[1]).expand(self.K, -1, -1) / (self.a/self.sqrt_d) ** 2
-            return Sigma, centers
+            return centers
 
         kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
         c = kmeans.cluster_centers_
@@ -949,29 +950,32 @@ class CovKernelCometric(CoMetric):
             mapping_dict = {i: j for i, j in zip(to_keep, range(self.K))}
             labels = np.array([mapping_dict[i] if i in mapping_dict else -1 for i in labels])
 
-        if not self.adaptative_std:
-            Sigma = torch.eye(c.shape[1]).expand(self.K, -1, -1) / (self.a/self.sqrt_d)**2
-        else:
-            Sigma = self.compute_sigma(embeds, c, labels)
+        return torch.from_numpy(c).to(torch.float32)
 
-        return Sigma, torch.from_numpy(c).to(torch.float32)
+    def get_rho(self, c: Tensor) -> Tensor:
+        """Compute the bandwidth as the max distance between two closest clusters."""
+        dst_mat = torch.cdist(c, c)  # (K,K)
+        # \rho = \max_i\min_{j\neq i} \lVert c_i-c_j\rVert_2
+        dst_mat[dst_mat == 0] = float("inf")
+        rho = dst_mat.min(dim=1).values.max()
+        rho = dst_mat.min(dim=1).values.mean()
+        rho = (self.a / self.sqrt_d) * rho
+        return rho
 
-    def compute_sigma(self, embeds, c, labels):
-        """Compute the bandwidth as the covariance of the points in each cluster."""
-        Sigma = torch.zeros(self.K, embeds.shape[1], embeds.shape[1])
-        # Compute the average distances to the cluster centers per clusters
-        for k in range(self.K):
-            idx_in_cluster = labels == k
-            z_in_cluster = embeds[idx_in_cluster]
-            local_cov = empirical_cov_mat(z_in_cluster, mu=c[k])
-            # local_cov = empirical_diag_cov_mat(z_in_cluster, mu=c[k])
-            local_cov = local_cov * (self.a/self.sqrt_d)**2 * 2.5  # Scale by a factor to smooth
-            Sigma[k] = local_cov.inverse()
-        return Sigma
+    def get_g_inv_c(self, q: Tensor, max_b_size: int = 32):
+        """Compute the cometric tensor at the given points
+        Batches the computation to avoid out of memory errors.
+        """
+        g_inv_c = self.eye(q)
+        for i in range(0, self.K, max_b_size):
+            j = min(i + max_b_size, self.K)
+            g_inv_c[i:j] = self.base_cometric(self.c[i:j])
+        return g_inv_c
 
     def forward(self, q):
         dx = q[:, None, :] - self.c[None, :, :]  # (B,K,d)
-        weights = torch.einsum("bki, kij, bki -> bk", dx, self.Sigma, dx)  # dx^T@Sigma@dx
+        weights = torch.einsum("bki,kij,bki->bk", dx, self.g_inv_c, dx)  # dx^T@G_inv@dx
+        weights = weights / self.rho**2
         weights = torch.exp(-0.5 * weights)  # (B,K)
         g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
         g_inv += self.reg_coef * self.eye(q)
