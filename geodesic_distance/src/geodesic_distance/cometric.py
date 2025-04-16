@@ -3,6 +3,7 @@ from torch import Tensor
 import torch.nn as nn
 from sklearn.cluster import KMeans
 import numpy as np
+from tqdm import tqdm
 
 
 def empirical_cov_mat(x: Tensor, mu: Tensor = None, eps=1e-6):
@@ -610,12 +611,15 @@ class DiffeoCometric(CoMetric):
     Parameters
     ----------
     diffeo: torch.nn.Module
-        Neural network model representing the diffeomorphism
+        Neural network model representing the diffeomorphism.
+        It should have signature (B,d) -> (B,...) (ie flattened input)
     reg_coef: float
         Regularization coefficient for the metric
+    chunk_size: int
+        Chunk size to use for computing the jacobian. Specifiy a value if running in memory issues.
     """
 
-    def __init__(self, diffeo: torch.nn.Module, reg_coef: float = 1e-3):
+    def __init__(self, diffeo: torch.nn.Module, reg_coef: float = 1e-3, chunk_size: int = 4):
         super().__init__()
         self.diffeo = diffeo
         self.reg_coef = reg_coef
@@ -623,8 +627,11 @@ class DiffeoCometric(CoMetric):
         if hasattr(self.diffeo, "jacobian"):
             self.jacobian = self.diffeo.jacobian
         else:
-            jacobian_ = torch.func.jacrev(self.diffeo)
-            self.jacobian = lambda x: torch.einsum("bibj->bij", jacobian_(x))
+            # jacobian_ = torch.func.jacrev(self.diffeo)
+            # self.jacobian = lambda x: torch.einsum("bibj->bij", jacobian_(x))
+            no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0))[0].flatten(1).squeeze(0)
+            jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
+            self.jacobian = torch.vmap(jacobian_)
 
     def metric(self, q: torch.Tensor):
         jacobian = self.jacobian(q)
@@ -833,7 +840,7 @@ class KernelCometric(CoMetric):
         #         )  # scale by a factor to smooth the metric
         #         lbd_k = 0.5 / sigma**2
         #         bandwidth[k] = lbd_k
-        return bandwidth
+        # return bandwidth
 
     def adjust_bandwidth(self, c):
         """Compute the bandwidth as the max distance between two closest clusters."""
@@ -913,15 +920,11 @@ class CovKernelCometric(CoMetric):
 
         self.register_buffer("c", torch.zeros(self.K, c.size(1)))
         self.register_buffer("g_inv_c", self.eye(c))
-        print("Getting centers")
-        c = self.get_centers(c.cpu(), use_knn)
-        self.c = c
+        c_ = self.get_centers(c.cpu(), use_knn)
+        self.c = c_.to(c.device)
 
-        print("Getting rho")
         self.rho = self.get_rho(c)
-        print("Getting g_inv_c")
-        # self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
-        self.g_inv_c = self.get_g_inv_c(self.c)
+        self.g_inv_c = self.get_g_inv_c(self.c) # (K,d,d)
 
     def get_centers(
         self, embeds: Tensor, use_knn, min_per_cluster: int = 5
@@ -955,19 +958,21 @@ class CovKernelCometric(CoMetric):
     def get_rho(self, c: Tensor) -> Tensor:
         """Compute the bandwidth as the max distance between two closest clusters."""
         dst_mat = torch.cdist(c, c)  # (K,K)
-        # \rho = \max_i\min_{j\neq i} \lVert c_i-c_j\rVert_2
+        # \rho = \mean\min_{j\neq i} \lVert c_i-c_j\rVert_2
         dst_mat[dst_mat == 0] = float("inf")
-        rho = dst_mat.min(dim=1).values.max()
+        # rho = dst_mat.min(dim=1).values.max()
         rho = dst_mat.min(dim=1).values.mean()
         rho = (self.a / self.sqrt_d) * rho
         return rho
 
+    @torch.no_grad()
     def get_g_inv_c(self, q: Tensor, max_b_size: int = 32):
         """Compute the cometric tensor at the given points
         Batches the computation to avoid out of memory errors.
         """
         g_inv_c = self.eye(q)
-        for i in range(0, self.K, max_b_size):
+        pbar = tqdm(range(0, self.K, max_b_size), desc="Computing g_inv_c", leave=False)
+        for i in pbar:
             j = min(i + max_b_size, self.K)
             g_inv_c[i:j] = self.base_cometric(self.c[i:j])
         return g_inv_c
