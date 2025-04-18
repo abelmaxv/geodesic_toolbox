@@ -924,11 +924,28 @@ class CovKernelCometric(CoMetric):
         self.c = c_.to(c.device)
 
         self.rho = self.get_rho(c)
-        self.g_inv_c = self.get_g_inv_c(self.c) # (K,d,d)
+        self.g_inv_c = self.get_g_inv_c(self.c)  # (K,d,d)
 
-    def get_centers(
-        self, embeds: Tensor, use_knn, min_per_cluster: int = 5
-    ) -> tuple[Tensor, Tensor]:
+    def get_centers(self, embeds: Tensor, use_knn, min_per_cluster: int = 5) -> Tensor:
+        """Compute the centers of the clusters using KMeans clustering.
+        If use_knn is False, the centers are the input data itself.
+        If use_knn is True, the centers are the cluster centers.
+
+        Parameters
+        ----------
+        embeds : torch.Tensor (N,d)
+            The input data
+        use_knn : bool
+            If True, the centers are computed using KMeans clustering.
+        min_per_cluster : int
+            The minimum number of samples per cluster. If the number of samples in a cluster is less than this,
+            the cluster is removed.
+
+        Output
+        ------
+        centers : torch.Tensor (K,d)
+            The centers of the clusters
+        """
 
         if not use_knn:
             self.K = embeds.shape[0]
@@ -956,7 +973,18 @@ class CovKernelCometric(CoMetric):
         return torch.from_numpy(c).to(torch.float32)
 
     def get_rho(self, c: Tensor) -> Tensor:
-        """Compute the bandwidth as the max distance between two closest clusters."""
+        """Compute the bandwidth as the mean of the distance between two closest clusters.
+
+        Parameters
+        ----------
+        c : torch.Tensor (K,d)
+            The keypoints
+
+        Output
+        ------
+        rho : torch.Tensor (1)
+            The bandwidth of the kernel
+        """
         dst_mat = torch.cdist(c, c)  # (K,K)
         # \rho = \mean\min_{j\neq i} \lVert c_i-c_j\rVert_2
         dst_mat[dst_mat == 0] = float("inf")
@@ -969,6 +997,18 @@ class CovKernelCometric(CoMetric):
     def get_g_inv_c(self, q: Tensor, max_b_size: int = 32):
         """Compute the cometric tensor at the given points
         Batches the computation to avoid out of memory errors.
+
+        Parameters
+        ----------
+        q : torch.Tensor (K,d)
+            Points to compute the cometric tensor at
+        max_b_size : int
+            Maximum batch size to use for the computation
+
+        Output
+        ------
+        g_inv_c : torch.Tensor (K,d,d)
+            Cometric tensor at the given points
         """
         g_inv_c = self.eye(q)
         pbar = tqdm(range(0, self.K, max_b_size), desc="Computing g_inv_c", leave=False)
@@ -977,9 +1017,21 @@ class CovKernelCometric(CoMetric):
             g_inv_c[i:j] = self.base_cometric(self.c[i:j])
         return g_inv_c
 
-    def forward(self, q):
+    def forward(self, q: Tensor) -> Tensor:
+        """Compute the cometric tensor at the given points
+
+        Parameters
+        ----------
+        q : torch.Tensor (B,d)
+            Coordinates of the points to compute the cometric tensor at
+
+        Output
+        ------
+        g_inv_interp : torch.Tensor (B,d,d)
+            Cometric tensor at the given points
+        """
         dx = q[:, None, :] - self.c[None, :, :]  # (B,K,d)
-        weights = torch.einsum("bki,kij,bki->bk", dx, self.g_inv_c, dx)  # dx^T@G_inv@dx
+        weights = torch.einsum("bki,kij,bkj->bk", dx, self.g_inv_c, dx)  # dx^T@G_inv@dx
         weights = weights / self.rho**2
         weights = torch.exp(-0.5 * weights)  # (B,K)
         g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
