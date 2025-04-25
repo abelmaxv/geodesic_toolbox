@@ -608,11 +608,13 @@ class DiffeoCometric(CoMetric):
     Thus, the cometric is just the inverse of the metric ; which makes this
     implementation slow.
 
+    Warning : this cometric's outputs are not differentiable. This is a design choice to
+    avoid out of memory issues.
+
     Parameters
     ----------
     diffeo: torch.nn.Module
-        Neural network model representing the diffeomorphism.
-        It should have signature (B,d) -> (B,...) (ie flattened input)
+        Neural network model. It should have signature (B,d) -> (B,...) (ie flattened input)
     reg_coef: float
         Regularization coefficient for the metric
     chunk_size: int
@@ -623,6 +625,7 @@ class DiffeoCometric(CoMetric):
         super().__init__()
         self.diffeo = diffeo
         self.reg_coef = reg_coef
+        self.chunk_size = chunk_size
 
         if hasattr(self.diffeo, "jacobian"):
             self.jacobian = self.diffeo.jacobian
@@ -631,18 +634,22 @@ class DiffeoCometric(CoMetric):
             # self.jacobian = lambda x: torch.einsum("bibj->bij", jacobian_(x))
             no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0))[0].flatten(1).squeeze(0)
             jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
-            self.jacobian = torch.vmap(jacobian_)
+            # self.jacobian = torch.vmap(jacobian_,chunk_size=chunk_size)
+            self.jacobian = torch.vmap(jacobian_,chunk_size=None)
 
+    @torch.no_grad()
     def metric(self, q: torch.Tensor):
         jacobian = self.jacobian(q)
         g = jacobian.mT @ jacobian
         g = g + self.reg_coef * self.eye(q)
         return g
 
+    @torch.no_grad()
     def forward(self, q: torch.Tensor):
         g = self.metric(q)
         return torch.linalg.inv(g)
 
+    @torch.no_grad()
     def inverse_forward(self, q: torch.Tensor, p: torch.Tensor):
         g = self.metric(q)
         return torch.einsum("bij,bj->bi", g, p)
@@ -880,7 +887,7 @@ class CovKernelCometric(CoMetric):
     G(q)_inv = sum_{i=1}^K w_i(q) G_inv(c_i) + reg_coef * Id
     where G_inv(c_i) is the cometric tensor at the keypoint c_i
     and w_i(q) = exp(- 1/(2*rho**2) * (q-c_i)^T G_inv(c_i) (q-c_i))
-    and rho = a * \sqrt{d} * max_i min_{j neq i} ||c_i-c_j||_2
+    and rho = a * sqrt{d} * max_i min_{j neq i} ||c_i-c_j||_2
     The keypoints can be computed using KMeans clustering on the input data.
 
     Parameters
@@ -990,7 +997,9 @@ class CovKernelCometric(CoMetric):
         dst_mat[dst_mat == 0] = float("inf")
         # rho = dst_mat.min(dim=1).values.max()
         rho = dst_mat.min(dim=1).values.mean()
-        rho = (self.a / self.sqrt_d) * rho
+        # rho = (self.a / self.sqrt_d) * rho
+        self.rho_base = rho
+        rho = self.a * rho
         return rho
 
     @torch.no_grad()
