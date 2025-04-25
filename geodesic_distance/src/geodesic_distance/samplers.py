@@ -9,7 +9,7 @@ from .cometric import CoMetric
 
 class Sampler(nn.Module):
     """
-    Base class for the samplers. It defines the interface for the samplers.
+    Base class for the MCMC samplers. It defines the interface for the samplers.
 
     Parameters
     ----------
@@ -21,7 +21,7 @@ class Sampler(nn.Module):
         super().__init__()
         self.pbar = pbar
 
-    def sample(self, z_0: Tensor) -> Tensor:
+    def sample(self, z_0: Tensor, return_acceptance: bool) -> Tensor | tuple[Tensor, float]:
         """
         Given an initial sample z_0, it returns a new sample from the target distribution.
 
@@ -29,16 +29,22 @@ class Sampler(nn.Module):
         ----------
         z_0 : Tensor (b,d)
             The initial sample.
+        return_acceptance : bool
+            If True, it returns the sample aswell as the acceptance rate.
 
         Returns
         -------
         Tensor (b,d)
             The new samples.
+        or
+        (Tensor (b,d), float)
         """
         raise NotImplementedError
 
     @torch.no_grad()
-    def forward(self, z_0: Tensor, n: int) -> Tensor:
+    def forward(
+        self, z_0: Tensor, n: int, return_acceptance: bool = False
+    ) -> Tensor | tuple[Tensor, float]:
         """
         Given initial samples z_0, it returns n new samples for each initial sample.
 
@@ -51,13 +57,19 @@ class Sampler(nn.Module):
             The initial samples.
         n : int
             The number of samples to generate for each initial sample.
+        return_acceptance : bool
+            If True, it returns the samples aswell as the acceptance rate.
 
         Returns
         -------
         Tensor (b,n,d)
             The new samples.
+        or
+        (Tensor (b,n,d), float)
+            The new samples and the acceptance rate.
         """
         new_samples = []
+        acceptance_rate = []
 
         # If the batch_size is bigger then the number of samples to generate
         # We process the sampling batch-wise, otherwise we process the sampling
@@ -65,15 +77,26 @@ class Sampler(nn.Module):
         if z_0.shape[0] > n:
             pbar = tqdm(range(n)) if self.pbar else range(n)
             for k in pbar:
-                new_samples.append(self.sample(z_0))
-            return torch.stack(new_samples, dim=1)
+                z_new, acc_rate = self.sample(z_0, return_acceptance=True)
+                acceptance_rate.append(acc_rate)
+                new_samples.append(z_new)
+            new_samples = torch.stack(new_samples, dim=1)
 
         else:
             pbar = tqdm(range(z_0.shape[0])) if self.pbar else range(z_0.shape[0])
             for k in pbar:
                 z_batch = z_0[k].repeat(n, 1)
-                new_samples.append(self.sample(z_batch))
-            return torch.stack(new_samples, dim=0)
+                z_new, acc_rate = self.sample(z_batch, return_acceptance=True)
+                acceptance_rate.append(acc_rate)
+                new_samples.append(z_new)
+            new_samples = torch.stack(new_samples, dim=0)
+
+        acceptance_rate = torch.mean(torch.stack(acceptance_rate)).item()
+
+        if return_acceptance:
+            return new_samples, acceptance_rate
+        else:
+            return new_samples
 
 
 class ConditionnalSampler(Sampler):
@@ -90,7 +113,9 @@ class ConditionnalSampler(Sampler):
     def __init__(self, pbar: bool = False):
         super().__init__(pbar)
 
-    def sample(self, z_0: Tensor) -> Tensor:
+    def sample(
+        self, z_0: Tensor, return_acceptance: bool = False
+    ) -> Tensor | tuple[Tensor, float]:
         """
         Given an initial sample z_0, it returns a new sample from the target distribution with the associated class.
 
@@ -98,6 +123,8 @@ class ConditionnalSampler(Sampler):
         ----------
         z_0 : Tensor (b,d)
             The initial sample.
+        return_acceptance : bool
+            If True, it returns the sample aswell as the acceptance rate.
 
         Returns
         -------
@@ -109,7 +136,9 @@ class ConditionnalSampler(Sampler):
         raise NotImplementedError
 
     @torch.no_grad()
-    def forward(self, z_0: Tensor, n: int) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, z_0: Tensor, n: int, return_acceptance: bool = False
+    ) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, float]:
         """
         Given initial samples z_0, it returns n new samples for each initial sample
         with the associated class.
@@ -120,6 +149,8 @@ class ConditionnalSampler(Sampler):
             The initial samples.
         n : int
             The number of samples to generate for each initial sample.
+        return_acceptance : bool
+            If True, it returns the samples and the class aswell as the acceptance rate.
 
         Returns
         -------
@@ -130,6 +161,7 @@ class ConditionnalSampler(Sampler):
         """
         new_samples = []
         new_classes = []
+        acceptance_rate = []
 
         # If the batch_size is bigger then the number of samples to generate
         # We process the sampling batch-wise, otherwise we process the sampling
@@ -137,22 +169,29 @@ class ConditionnalSampler(Sampler):
         if z_0.shape[0] > n:
             pbar = tqdm(range(n)) if self.pbar else range(n)
             for k in pbar:
-                x, y = self.sample(z_0)
+                x, y, acc_rate = self.sample(z_0, return_acceptance=True)
                 new_samples.append(x)
                 new_classes.append(y)
+                acceptance_rate.append(acc_rate)
             new_classes = torch.stack(new_classes, dim=1)
             new_samples = torch.stack(new_samples, dim=1)
-            return new_samples, new_classes
 
         else:
             pbar = tqdm(range(z_0.shape[0])) if self.pbar else range(z_0.shape[0])
             for k in pbar:
                 z_batch = z_0[k].repeat(n, 1)
-                x, y = self.sample(z_batch)
+                x, y, acc_rate = self.sample(z_batch, return_acceptance=True)
                 new_samples.append(x)
                 new_classes.append(y)
+                acceptance_rate.append(acc_rate)
             new_classes = torch.stack(new_classes, dim=0)
             new_samples = torch.stack(new_samples, dim=0)
+
+        acceptance_rate = torch.mean(torch.Tensor(acceptance_rate)).item()
+
+        if return_acceptance:
+            return new_samples, new_classes, acceptance_rate
+        else:
             return new_samples, new_classes
 
 
@@ -175,10 +214,16 @@ class ConstantClassSampler(ConditionnalSampler):
         self.sampler = sampler
         self.y = y
 
-    def sample(self, z_0: Tensor) -> tuple[Tensor, Tensor]:
-        x = self.sampler.sample(z_0)
+    def sample(
+        self, z_0: Tensor, return_acceptance: bool = False
+    ) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, float]:
         y = torch.full((z_0.shape[0],), self.y, dtype=torch.long, device=z_0.device)
-        return x, y
+        if return_acceptance:
+            x, acc_rate = self.sampler.sample(z_0, return_acceptance=True)
+            return x, y, acc_rate
+        else:
+            x = self.sampler.sample(z_0)
+            return x, y
 
 
 class MixtureOfSamplers(nn.Module):
@@ -199,7 +244,9 @@ class MixtureOfSamplers(nn.Module):
     def __iter__(self):
         yield from self.samplers
 
-    def forward(self, z_0: Tensor, n: int) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, z_0: Tensor, n: int, return_acceptance: bool = False
+    ) -> Tensor | tuple[Tensor, float]:
         """
         Samples n new samples from the mixture of samplers.
         Each sampler is used n//n_samplers times.
@@ -219,12 +266,14 @@ class MixtureOfSamplers(nn.Module):
         """
 
         x = []
+        acceptance_rate = []
 
         for i in range(self.n_samplers):
             n_i = n // self.n_samplers
             if n_i == 0:
                 continue
-            x_i = self.samplers[i](z_0, n_i)
+            x_i, acc_rate = self.samplers[i](z_0, n_i, return_acceptance=True)
+            acceptance_rate.append(acc_rate)
             x.append(x_i)
 
         # If n%self.n_samplers != 0, we need to sample the remaining samples
@@ -232,12 +281,18 @@ class MixtureOfSamplers(nn.Module):
         if n % self.n_samplers != 0:
             i = torch.randint(0, self.n_samplers, (1,)).item()
             n_i = n % self.n_samplers
+            x_i, acc_rate = self.samplers[i](z_0, n_i, return_acceptance=True)
+            acceptance_rate.append(acc_rate)
             x_i = self.samplers[i](z_0, n_i)
             x.append(x_i)
 
         x = torch.cat(x, dim=1)
+        acceptance_rate = torch.mean(torch.stack(acceptance_rate)).item()
 
-        return x
+        if return_acceptance:
+            return x, acceptance_rate
+        else:
+            return x
 
 
 class MixtureOfCondtionnalSamplers(nn.Module):
@@ -255,7 +310,9 @@ class MixtureOfCondtionnalSamplers(nn.Module):
         self.samplers = samplers
         self.n_samplers = len(samplers)
 
-    def forward(self, z_0: Tensor, n: int) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, z_0: Tensor, n: int, return_acceptance: bool = False
+    ) -> tuple[Tensor, Tensor] | tuple[Tensor, Tensor, float]:
         """
         Samples n new samples from the mixture of samplers.
         Each sampler is used n//n_samplers times.
@@ -277,26 +334,33 @@ class MixtureOfCondtionnalSamplers(nn.Module):
         """
 
         x, y = [], []
+        acceptance_rate = []
 
         for i in range(self.n_samplers):
             n_i = n // self.n_samplers
-            x_i, y_i = self.samplers[i](z_0, n_i)
+            x_i, y_i, acc_rate = self.samplers[i](z_0, n_i, return_acceptance=True)
             x.append(x_i)
             y.append(y_i)
+            acceptance_rate.append(acc_rate)
 
         # If n%self.n_samplers != 0, we need to sample the remaining samples
         # Just take a random sampler and sample the remaining samples
         if n % self.n_samplers != 0:
             i = torch.randint(0, self.n_samplers, (1,)).item()
             n_i = n % self.n_samplers
-            x_i, y_i = self.samplers[i](z_0, n_i)
+            x_i, y_i, acc_rate = self.samplers[i](z_0, n_i, return_acceptance=True)
             x.append(x_i)
             y.append(y_i)
+            acceptance_rate.append(acc_rate)
 
         x = torch.cat(x, dim=1)
         y = torch.cat(y, dim=1)
+        acceptance_rate = torch.mean(torch.stack(acceptance_rate)).item()
 
-        return x, y
+        if return_acceptance:
+            return x, y, acceptance_rate
+        else:
+            return x, y
 
 
 class HMCSampler(Sampler):
@@ -402,8 +466,9 @@ class HMCSampler(Sampler):
         """
         alpha = self.proposal_rate(z, v, z_new, v_new)
         z_norm = torch.linalg.norm(z_new, dim=-1)
-        out_of_bounds = z_norm > self.bounds
-        alpha[out_of_bounds] = 0
+        if self.bounds is not None:
+            out_of_bounds = z_norm > self.bounds
+            alpha[out_of_bounds] = 0
         return alpha
 
     def leapfrog(self, z: Tensor, v: Tensor) -> Tensor:
@@ -476,23 +541,40 @@ class HMCSampler(Sampler):
                 accepted_samples += mask.sum().item()
             else:
                 z = z_l
+                accepted_samples += z.shape[0]
 
             if return_traj:
                 traj.append(z.clone())
 
             if progress:
-                pbar.set_postfix({"acceptance_rate": accepted_samples / ((k + 1) * z_0.shape[0])})
+                pbar.set_postfix(
+                    {"acceptance_rate": accepted_samples / ((k + 1) * z_0.shape[0])}
+                )
+
+        acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
 
         if return_traj:
             traj = torch.stack(traj, dim=1)
             if not self.skip_acceptance:
-                acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
                 return traj, acceptance_rate
         if return_acceptance:
-            acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
             return z, acceptance_rate
         else:
             return z
+
+
+# =================================================================================
+# =================================================================================
+# =================================================================================
+# =================================================================================
+# =================================================================================
+# @TODO : Finish to adapt the other samplers to the new interface
+# =================================================================================
+# =================================================================================
+# =================================================================================
+# =================================================================================
+# =================================================================================
+# =================================================================================
 
 
 class MMALA(Sampler):
