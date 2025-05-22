@@ -635,7 +635,7 @@ class DiffeoCometric(CoMetric):
             no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0))[0].flatten(1).squeeze(0)
             jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
             # self.jacobian = torch.vmap(jacobian_,chunk_size=chunk_size)
-            self.jacobian = torch.vmap(jacobian_,chunk_size=None)
+            self.jacobian = torch.vmap(jacobian_, chunk_size=None)
 
     @torch.no_grad()
     def metric(self, q: torch.Tensor):
@@ -1046,3 +1046,47 @@ class CovKernelCometric(CoMetric):
         g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
         g_inv += self.reg_coef * self.eye(q)
         return g_inv
+
+
+class RandersMetrics(nn.Module):
+    """Randers metrics with a fixed base metric and a variable 1-form.
+
+    The 1-form must verify the condition that the resulting Randers metric is positive.
+    It is up to the user to ensure this condition is satisfied.
+
+    Parameters
+    ----------
+    base_cometric : CoMetric
+        Base cometric to use for the Randers metric.
+    omega : nn.Module
+        1-form to use for the Randers metric. It should be a function that takes
+        in points on the manifold and outputs a vector of the same size as the points.
+    """
+
+    def __init__(self, base_cometric: CoMetric, omega: nn.Module):
+        super(RandersMetrics, self).__init__()
+        self.base_cometric = base_cometric
+        self.omega = omega
+
+    def forward(self, x: Tensor, v: Tensor):
+        """Compute F(x,v) = |v|_{base_cometric} + omega(x) . v
+
+        Parameters
+        ----------
+        x : torch.Tensor (b,d)
+            Points in the manifold
+        v : torch.Tensor (b,d)
+            Tangent vectors at x
+
+        Returns
+        -------
+        F : torch.Tensor (b,)
+            Randers metric at x in the direction of v
+        """
+        x_norm = torch.einsum("bi,bij,bj->b", v, self.base_cometric(x), v).sqrt()
+
+        omega_x = self.omega(x)
+        omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
+
+        F = x_norm + omega_x_v
+        return F

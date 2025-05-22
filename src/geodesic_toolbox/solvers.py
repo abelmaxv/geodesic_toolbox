@@ -11,7 +11,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 from scipy.interpolate import CubicSpline
 
-from .cometric import CoMetric, IdentityCoMetric
+from .cometric import CoMetric, IdentityCoMetric, RandersMetrics
 from .utils import (
     magnification_factor,
     hamiltonian,
@@ -1434,3 +1434,427 @@ def dst_mat_vectorized(
     distances = distances_flat.reshape(B, B)
 
     return distances
+
+
+class SolverGraphRanders(torch.nn.Module):
+    """Computes the geodesic distances between points using a KNN-graph
+    for metrics from a Randers space.
+
+    Parameters
+    ----------
+    randers_metric : nn.Module
+        The metric to use to compute the geodesic distances
+    data : torch.Tensor (N,D)
+        The data points used to compute the graph
+    n_neighbors : int
+        The number of neighbors to use
+    dt : float
+        The time step to use for the linear interpolation
+    batch_size : int
+        The size of the batch to use for the computation of the graph
+    """
+
+    def __init__(
+        self,
+        randers_metric: RandersMetrics,
+        data: torch.Tensor,
+        n_neighbors: int,
+        dt: float = 0.01,
+        batch_size: int = 64,
+    ) -> None:
+        super(SolverGraphRanders, self).__init__()
+        self.randers_metric = randers_metric
+        self.data = data
+        self.n_neighbors = n_neighbors
+        self.dt = dt
+        self.T = int(1 / self.dt)
+        self.b_size = batch_size
+
+        self.W, self.knn = self.init_knn_graph(data, n_neighbors, batch_size)
+        self.predecessors = self.get_predecessors()
+
+    def init_knn_graph(
+        self, data: torch.Tensor, n_neighbors: int, b_size: int = 64
+    ) -> torch.Tensor:
+        """Initialize the graph using a KNN graph.
+
+        Parameters
+        ----------
+        data : torch.Tensor (N,D)
+            The data points
+        n_neighbors : int
+            The number of neighbors to use
+        b_size : int
+            The size of the batch to use for the computation
+
+        Returns
+        -------
+        W : torch.Tensor (N,N)
+            The weight matrix of the graph
+        knn : NearestNeighbors
+            The KNN object
+        """
+        # We add one to the number of neighbors to remove the point itself
+        knn = NearestNeighbors(n_neighbors=n_neighbors + 1, algorithm="ball_tree")
+        knn.fit(data.cpu())
+        t = torch.arange(0, 1, self.dt, device=data.device).view(1, 1, -1, 1)  # (1,1,T,1)
+
+        # Find the Euclidean kNN
+        N_data = data.shape[0]
+        _, indices = knn.kneighbors(data.cpu())
+        indices = indices[:, 1:]  # Remove the point itself
+        Weight_matrix = np.zeros((N_data, N_data))
+
+        num_batches = (N_data + b_size - 1) // b_size
+
+        pbar = tqdm(range(num_batches), desc="Initialize Graph", unit="batch")
+        with torch.no_grad():
+            for batch_idx in pbar:
+                start = batch_idx * b_size
+                end = min(start + b_size, N_data)
+                batch_idx = torch.arange(start, end)  # (b,)
+                curr_idx = indices[batch_idx]  # (b,k)
+
+                p_i = data[batch_idx][:, None, None, :]  # (b,1,1,d)
+                p_j = data[curr_idx][:, :, None, :]  # (b,k,1,d)
+
+                linear_traj = p_i + t * (p_j - p_i)  # (b,k,T,d)
+                tangent_vectors = p_j - p_i
+                tangent_vectors = tangent_vectors.expand(-1, -1, self.T, -1)
+                linear_traj = rearrange(linear_traj, "b k T d -> (b k) T d")
+                tangent_vectors = rearrange(tangent_vectors, "b k T d -> (b k) T d")
+                curve_length = self.compute_distance(linear_traj, tangent_vectors)
+
+                curve_length = rearrange(curve_length, "(b k) -> b k", b=batch_idx.shape[0])
+                Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length.cpu()
+
+        # W = 0.5 * (Weight_matrix + Weight_matrix.T)
+        return Weight_matrix, knn
+
+    def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor):
+        """Given a trajectory and the tangent vectors, compute the distance
+        under the Randers metric.
+
+        Parameters
+        ----------
+        traj : torch.Tensor (b,T,d)
+            The trajectory. There are b trajectories of T points in d dimensions
+        tangent_vectors : torch.Tensor (b,T,d)
+            The tangent vectors at each point of the trajectory
+
+        Returns
+        -------
+        dst : torch.Tensor (b,)
+            The distance between the two points
+        """
+        # Compute the distance using the Randers metric
+        traj_ = rearrange(traj, "b T d -> (b T) d")
+        tangent_vectors = rearrange(tangent_vectors, "b T d -> (b T) d")
+        dst = self.randers_metric(traj_, tangent_vectors)  # (b*T,)
+        dst = rearrange(dst, "(b T) -> b T", b=traj.shape[0])
+        dst = dst.sum(dim=1)  # (b,)
+        return dst
+
+    def get_similarity_matrix(self, W, sigma=1):
+        """Compute the similarity matrix using the weight matrix W
+
+        Parameters
+        ----------
+        W : torch.Tensor (N,N)
+            The weight matrix
+        sigma : float
+            The sigma to use for the similarity matrix
+
+        Returns
+        -------
+        S : torch.Tensor (N,N)
+            The similarity matrix
+        """
+        S = torch.exp(-W / (2 * sigma**2))
+        return S
+
+    def get_predecessors(self) -> torch.Tensor:
+        """Get the predecessors for the shortest path computation..."""
+        print("Computing predecessors...")
+        dst_matrix, predecessors = shortest_path(
+            csr_matrix(self.W),
+            directed=True,
+            return_predecessors=True,
+        )
+        print("Done.")
+        return torch.from_numpy(predecessors)
+
+    def linear_interpolation(self, p_i, p_j, t):
+        """
+        Linear interpolation between two points
+
+        Parameters:
+        ----------
+        p_i : Tensor (b,d)
+            The starting point
+        p_j : Tensor (b,d)
+            The ending point
+        t : Tensor (n_pts,)
+
+        Returns:
+        --------
+        traj_q : Tensor (b,n_pts,d)
+            The linear interpolation between the two points
+        """
+        return p_i[:, None, :] + t[None, :, None] * (p_j - p_i)[:, None, :]
+
+    def connect_to_graph(
+        self, q0: Tensor, q1: Tensor, euclidean_only: bool = True
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Given two batch of points q0 and q1, find their closest point in the graph
+        The closest points are determined by the linear interpolation metric
+        distance (not euclidean) between the points.
+
+        Parameters:
+        -----------
+        q0 : Tensor (B,d)
+            start point
+        q1 : Tensor (B,d)
+            end point
+        euclidean_only : bool
+            If True, only use the euclidean distance to find the closest points
+
+        Returns:
+        --------
+        closest_q0 : Tensor (B,)
+            Indicices of the closest point in self.data to q0
+        closest_q1 : Tensor (B,)
+            Indicices of the closest point in self.data to q1
+        """
+        B = q0.shape[0]
+
+        # Get the indices of the closest points in the graph
+        _, ind0 = self.knn.kneighbors(q0.detach().cpu())
+        _, ind1 = self.knn.kneighbors(q1.detach().cpu())
+
+        if euclidean_only:
+            closest_q0 = torch.from_numpy(ind0[:, 0])
+            closest_q1 = torch.from_numpy(ind1[:, 0])
+            return closest_q0.int(), closest_q1.int()
+
+        # Get rid of the last one that we added for initialisation
+        ind0 = ind0[:, :-1]  # (B,K)
+        ind1 = ind1[:, :-1]
+
+        q0_neighbors = torch.zeros(
+            B, self.n_neighbors, self.data.shape[1], device=q0.device
+        )  # (B,K,D)
+        q1_neighbors = torch.zeros(B, self.n_neighbors, self.data.shape[1], device=q0.device)
+
+        for n in range(self.n_neighbors):
+            q0_neighbors[:, n, :] = self.data[ind0[:, n]]
+            q1_neighbors[:, n, :] = self.data[ind1[:, n]]
+
+        # Find the points with the closest metric distance to q0 and q1
+        t = torch.arange(0, 1, self.dt, device=q0.device)
+
+        closest_q0 = torch.zeros(B).int()
+        closest_q1 = torch.zeros(B).int()
+
+        for b in range(B):
+            q0b = q0[b].reshape(1, -1).expand(self.n_neighbors, -1)  # (K,d)
+            q0b_neigh = q0_neighbors[b]  # (K,d)
+            linear_traj = self.linear_interpolation(
+                q0b, q0b_neigh, t
+            )  # (n_neighbors, n_pts, d)
+            tangent_vectors = (q0b_neigh - q0b).repeat(self.T, 1, 1)  # (n_neighbors, n_pts, d)
+
+            dst_to_q0b = self.compute_distance(linear_traj, tangent_vectors)  # (n_neighbors,)
+            argmin_length = torch.argmin(dst_to_q0b)
+            closest_q0[b] = ind0[b, argmin_length]
+
+            q1b = q1[b].reshape(1, -1).expand(self.n_neighbors, -1)  # (K,d)
+            q1b_neigh = q1_neighbors[b]  # (K,d)
+            linear_traj = self.linear_interpolation(
+                q1b, q1b_neigh, t
+            )  # (n_neighbors, n_pts, d)
+            tangent_vectors = (q1b_neigh - q1b).repeat(self.T, 1, 1)  # (n_neighbors, n_pts, d)
+            dst_to_q1b = self.compute_distance(linear_traj, tangent_vectors)  # (n_neighbors,)
+            argmin_length = torch.argmin(dst_to_q1b)
+            closest_q1[b] = ind1[b, argmin_length]
+        return closest_q0, closest_q1
+
+    def get_path_idx(self, start_idx: Tensor, end_idx: Tensor, max_path_length: int = 2000):
+        """
+        Given the start and end indices, retrieve the path in the graph.
+
+        Parameters:
+        -----------
+        start_idx : Tensor (B,)
+            The starting indices
+        end_idx : Tensor (B,)
+            The ending indices
+        max_path_length : int
+            The maximum length of the path. If the path is longer, it will be truncated.
+
+        Returns:
+        --------
+        path : Tensor (B,max_traj_length)
+            The path in the graph. The value -9999 means the path is done.
+        """
+        B = start_idx.shape[0]
+        temp_idx = end_idx
+        path = [end_idx]
+
+        iter = 0
+        nb_pts_in_path = torch.zeros(B)
+        # Simply properly retrieve the path
+        while (nb_pts_in_path == 0).any() and iter < max_path_length:
+            iter += 1
+            pred_idx = self.predecessors[start_idx, temp_idx]
+            if (pred_idx == -9999).any():
+                # A path is done
+                b_end_path = torch.argwhere(pred_idx == -9999).squeeze(1)
+                b_end_path = torch.zeros(B, dtype=bool).scatter(0, b_end_path, True)
+                lenght_to_update = (nb_pts_in_path == 0) & b_end_path
+                nb_pts_in_path[lenght_to_update] = iter
+                temp_idx[b_end_path] = start_idx[b_end_path]
+                temp_idx[~b_end_path] = pred_idx[~b_end_path]
+            else:
+                temp_idx = pred_idx
+            path.append(pred_idx.clone())
+
+            if iter >= max_path_length:
+                print("Max path length reached")
+                break
+
+        path = torch.stack(path, dim=1)
+        return path
+
+    def get_pts_from_idx(self, start_idx: Tensor, path_idx: Tensor, censor_value: int = -9999):
+        """From the indices, retrieve the points in the graph
+
+        Parameters:
+        -----------
+        start_idx : Tensor (B,)
+            The starting indices of the path.
+        path_idx : Tensor (B,max_traj_length)
+            The indices of the points in the graph
+        censor_value : int
+            The value that indicates the end of the path.
+
+        Returns:
+        --------
+        path : Tensor (B,max_traj_length,d)
+            The points in the graph. The end of the path are padded to max_traj_length with the last valid point.
+        """
+        maks = path_idx == censor_value
+        replacement_values = start_idx.unsqueeze(1).expand(-1, path_idx.shape[1])
+        # We replace the censor_value by the starting point
+        path_idx = torch.where(maks, replacement_values, path_idx)
+        pts_on_traj = self.data[path_idx]
+        return pts_on_traj
+
+    def get_trajectories(self, q0: Tensor, q1: Tensor, connect_euclidean: bool = False):
+        """
+        Compute the geodesic trajectories between two points.
+        This amounts to properly connecting the points to the KNN graph and then
+        computing the shortest path between the two points.
+
+        Parameters:
+        -----------
+        q0 : Tensor (b,d)
+            The starting points
+        q1 : Tensor (b,d)
+            The ending points
+        connect_euclidean : bool
+            If True, only use the euclidean distance to find the closest points
+
+        Returns:
+        --------
+        pts_on_traj : Tensor (b,T,d)
+            The points on the trajectory
+        """
+        start_idx, end_idx = self.connect_to_graph(q0, q1, euclidean_only=connect_euclidean)
+        path_idx = self.get_path_idx(start_idx, end_idx)
+
+        pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1], device=q0.device)
+        for b in range(q0.shape[0]):
+            pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b])
+
+        # pts_on_traj = self.get_pts_from_idx(start_idx, path_idx)
+        pts_on_traj = torch.cat([q1[:, None, :], pts_on_traj, q0[:, None, :]], dim=1)
+
+        # Reverse end->start to start->end
+        pts_on_traj = pts_on_traj.flip(1)
+        return pts_on_traj
+
+    def reparametrize_curve(
+        self, idx_traj: Tensor, q0, q1, censor_value=-9999, smooth_curve=True
+    ) -> Tensor:
+        """
+        Reparametrize a single curve to have a fixed number of points using a cubic spline.
+
+        Parameters:
+        -----------
+        idx_traj : Tensor (n_pts)
+            The indices of the points on the trajectory.
+        q0 : Tensor (d,)
+            The starting point
+        q1 : Tensor (d,)
+            The ending point
+        censor_value : int
+            The value that indicates the end of the path in idx_traj
+        smooth_curve : bool
+            If True, smooth the curve with a mean kernel before feeding it to the spline
+
+        Returns:
+        --------
+        traj_q : Tensor (n_pts,d)
+            The reparametrized trajectories
+        """
+        # Find the first occurence of the censor value
+        mask = idx_traj == censor_value
+        first_censor = torch.argmax(mask.int())
+        # Retrieve the correct trajectory
+        idx_traj = idx_traj[:first_censor]
+        traj_q = self.data[idx_traj]
+        traj_q = torch.cat([q1.unsqueeze(0), traj_q, q0.unsqueeze(0)], dim=0)
+
+        if smooth_curve:
+            # Smooth the curve with a mean kernel
+            # Pad the curve with two  points at the start and end
+            p0 = traj_q[0].unsqueeze(0)
+            p1 = traj_q[-1].unsqueeze(0)
+            traj_q = torch.cat([p0, p0, traj_q, p1, p1], dim=0)
+            traj_q = traj_q.unfold(0, 3, 1).mean(dim=2)
+
+        # Resample the curve
+        cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q.cpu())
+        traj_q = cs(np.arange(0, 1, self.dt))
+        traj_q = torch.from_numpy(traj_q).float().to(q0.device)
+        return traj_q
+
+    def forward(self, q0: Tensor, q1: Tensor, connect_euclidean: bool = False):
+        """
+        Computes the geodesic distances between two points q0 and q1 using the KNN graph.
+
+        Parameters:
+        -----------
+        q0 : Tensor (b,d)
+            The starting points
+        q1 : Tensor (b,d)
+            The ending points
+        connect_euclidean : bool
+            If True, only use the euclidean distance to find the closest points
+
+        Returns:
+        --------
+        dst : Tensor (b,)
+            The geodesic distances between the two points
+        """
+        pts_on_traj = self.get_trajectories(q0, q1, connect_euclidean=connect_euclidean)
+        traj_front = pts_on_traj[:, 1:, :]
+        traj_back = pts_on_traj[:, :-1, :]
+        segments = traj_front - traj_back
+        midpoints = (traj_front + traj_back) / 2
+
+        dst = self.compute_distance(midpoints, segments)
+
+        return dst
