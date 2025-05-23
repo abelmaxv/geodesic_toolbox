@@ -113,6 +113,17 @@ class CoMetric(torch.nn.Module):
         """
         raise NotImplementedError
 
+    def cometric_tensor(self, q: Tensor) -> Tensor:
+        """Computes G^-1(q) for a batch of points q
+
+        Params:
+        q : Tensor (b,d) batch of points
+
+        Output:
+        res : Tensor (b,d,d) inverse metric tensor
+        """
+        return self.forward(q)
+
     def metric(self, q: Tensor) -> Tensor:
         """Computes G(q) for a batch of points q
 
@@ -594,7 +605,9 @@ class CometricModel(CoMetric):
 
         G_inv = torch.bmm(L, L.transpose(1, 2))
 
-        return G_inv + self.lbd * self.eye(features)
+        id = self.lbd * self.eye(G_inv[:,:,0])
+
+        return G_inv + self.lbd * id
 
     def extra_repr(self) -> str:
         return f"input_dim={self.input_dim}, hidden_dim={self.hidden_dim}, latent_dim={self.latent_dim}, lbd={self.lbd}"
