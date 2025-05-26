@@ -1074,15 +1074,21 @@ class RandersMetrics(nn.Module):
     omega : nn.Module
         1-form to use for the Randers metric. It should be a function that takes
         in points on the manifold and outputs a vector of the same size as the points.
+    beta : float
+        Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1]. W
+        When beta=0, the Randers metric reduces to the base cometric.
+        
     """
 
-    def __init__(self, base_cometric: CoMetric, omega: nn.Module):
+    def __init__(self, base_cometric: CoMetric, omega: nn.Module,beta: float = 1.0):
         super(RandersMetrics, self).__init__()
         self.base_cometric = base_cometric
         self.omega = omega
+        assert 0 <= beta <= 1, "Beta must be in the range [0, 1]"
+        self.beta = beta
 
     def forward(self, x: Tensor, v: Tensor):
-        """Compute F(x,v) = |v|_{base_cometric} + omega(x) . v
+        """Compute F(x,v) = |v|_{base_cometric} + beta *  omega(x) . v
 
         Parameters
         ----------
@@ -1101,5 +1107,5 @@ class RandersMetrics(nn.Module):
         omega_x = self.omega(x)
         omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
 
-        F = x_norm + omega_x_v
+        F = x_norm + self.beta * omega_x_v
         return F
