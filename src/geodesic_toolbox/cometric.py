@@ -102,16 +102,6 @@ class CoMetric(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, q: Tensor) -> Tensor:
-        """Computes G^-1(q) for a batch of points q
-
-        Params:
-        q : Tensor (b,d) batch of points
-
-        Output:
-        res : Tensor (b,d,d) inverse metric tensor
-        """
-        raise NotImplementedError
 
     def cometric_tensor(self, q: Tensor) -> Tensor:
         """Computes G^-1(q) for a batch of points q
@@ -124,6 +114,17 @@ class CoMetric(torch.nn.Module):
         """
         return self.forward(q)
 
+    def metric_tensor(self, q: Tensor) -> Tensor:
+        """Computes G(q) for a batch of points q
+
+        Params:
+        q : Tensor (b,d) batch of points
+
+        Output:
+        res : Tensor (b,d,d) metric tensor
+        """
+        return self.cometric_tensor(q).inverse() 
+
     def metric(self, q: Tensor) -> Tensor:
         """Computes G(q) for a batch of points q
 
@@ -134,7 +135,32 @@ class CoMetric(torch.nn.Module):
         res : Tensor (b,d,d) metric tensor
         """
         return torch.linalg.inv(self.forward(q))
+        #@TODO change this function to v^TG(q)v and all of the rest of the code
+        return torch.einsum("bi,bij->bj", v, self.metric_tensor(q),v)
 
+    def cometric(self, q: Tensor,v:Tensor) -> Tensor:
+        """Computes v^T G(q) v for a batch of points q at momenta v
+
+        Params:
+        q : Tensor (b,d) batch of points
+        v : Tensor (b,d) batch of momenta
+
+        Output:
+        res : Tensor (b,) G(q)@v
+        """
+        return torch.einsum("bij,bi->b", self.cometric_tensor(q), v)
+
+    def forward(self, q: Tensor) -> Tensor:
+        """Computes G^-1(q) for a batch of points q
+
+        Params:
+        q : Tensor (b,d) batch of points
+
+        Output:
+        res : Tensor (b,d,d) inverse metric tensor
+        """
+        raise NotImplementedError
+    
     def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
         """Computes G(q)@p for a batch of points q at momenta p
 
