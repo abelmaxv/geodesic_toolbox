@@ -102,7 +102,6 @@ class CoMetric(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
-
     def cometric_tensor(self, q: Tensor) -> Tensor:
         """Computes G^-1(q) for a batch of points q
 
@@ -123,7 +122,7 @@ class CoMetric(torch.nn.Module):
         Output:
         res : Tensor (b,d,d) metric tensor
         """
-        return self.cometric_tensor(q).inverse() 
+        return self.cometric_tensor(q).inverse()
 
     def metric(self, q: Tensor) -> Tensor:
         """Computes G(q) for a batch of points q
@@ -135,10 +134,10 @@ class CoMetric(torch.nn.Module):
         res : Tensor (b,d,d) metric tensor
         """
         return torch.linalg.inv(self.forward(q))
-        #@TODO change this function to v^TG(q)v and all of the rest of the code
-        return torch.einsum("bi,bij->bj", v, self.metric_tensor(q),v)
+        # @TODO change this function to v^TG(q)v and all of the rest of the code
+        return torch.einsum("bi,bij->bj", v, self.metric_tensor(q), v)
 
-    def cometric(self, q: Tensor,v:Tensor) -> Tensor:
+    def cometric(self, q: Tensor, v: Tensor) -> Tensor:
         """Computes v^T G(q) v for a batch of points q at momenta v
 
         Params:
@@ -160,7 +159,7 @@ class CoMetric(torch.nn.Module):
         res : Tensor (b,d,d) inverse metric tensor
         """
         raise NotImplementedError
-    
+
     def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
         """Computes G(q)@p for a batch of points q at momenta p
 
@@ -631,7 +630,7 @@ class CometricModel(CoMetric):
 
         G_inv = torch.bmm(L, L.transpose(1, 2))
 
-        id = self.lbd * self.eye(G_inv[:,:,0])
+        id = self.lbd * self.eye(G_inv[:, :, 0])
 
         return G_inv + self.lbd * id
 
@@ -1087,6 +1086,49 @@ class CovKernelCometric(CoMetric):
         return g_inv
 
 
+class CentroidsCometric(CoMetric):
+    """Cometric based on the cometric computed on centroids.
+    New cometric is computed as a gaussian interpolation of the cometric at the centroids.
+
+    Parameters
+    ----------
+    centroids : torch.Tensor (K,d)
+        The centroids of the clusters
+    cometric_centroids: torch.Tensor (K,d,d)
+        The cometric tensor at the centroids
+    temperature : float
+        The temperature of the gaussian kernel. It controls the smoothness of the interpolation.
+    reg_coef : float
+        Regularization coefficient for the cometric
+    """
+
+    def __init__(
+        self,
+        centroids: Tensor,
+        cometric_centroids: Tensor,
+        temperature: float = 1.0,
+        reg_coef: float = 1e-3,
+    ):
+        super().__init__()
+        self.centroids = centroids
+        #@TODO: check if cometric_centroids is a valid cometric tensor
+        self.cometric_centroids = cometric_centroids
+
+        self.temperature = temperature
+        self.reg_coef = reg_coef
+
+    def forward(self, z: Tensor) -> Tensor:
+        dz = self.centroids[None, :, :] - z[:, None, :]  # (m,b,d)
+        dz = torch.linalg.norm(dz, dim=-1)  # (m,b)
+        # dz = torch.einsum("mbi,bij,mbj->mb", dz, self.cometric_centroids, dz)  # dz^T@G_inv@dz
+        weights = torch.exp(-(dz**2) / (2 * self.temperature**2))
+
+        G_inv = weights[:, :, None, None] * self.cometric_centroids[None, :, :, :]  # (m,b,d,d)
+        G_inv = G_inv.sum(dim=1)  # (m,d,d)
+        G_inv = G_inv + self.reg_coef * self.eye(z)  # (m,d,d)
+        return G_inv
+
+
 class RandersMetrics(nn.Module):
     """Randers metrics with a fixed base metric and a variable 1-form.
 
@@ -1103,10 +1145,8 @@ class RandersMetrics(nn.Module):
     beta : float
         Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1]. W
         When beta=0, the Randers metric reduces to the base cometric.
-        
     """
-
-    def __init__(self, base_cometric: CoMetric, omega: nn.Module,beta: float = 1.0):
+    def __init__(self, base_cometric: CoMetric, omega: nn.Module, beta: float = 1.0):
         super(RandersMetrics, self).__init__()
         self.base_cometric = base_cometric
         self.omega = omega
@@ -1135,3 +1175,101 @@ class RandersMetrics(nn.Module):
 
         F = x_norm + self.beta * omega_x_v
         return F
+
+
+class SmallConvCometricModel(CoMetric):
+    """
+    Simple convolutional metric backbone
+    It expects to receive square image of shape (B, C, W, W) where
+    Params:
+    -------
+    latent_dim : int
+        Dimension of the latent space
+    n_channels : int
+        Number of channels of the image (BW or RBG)
+    width : int
+        Width of the input image (assumed to be square)
+    lbd : float
+        Regularization parameter to avoid singularities in the metric tensor
+
+    Returns:
+    -------
+    G_inv : Tensor (B, latent_dim, latent_dim)
+        The inverse of the metric tensor for the input images
+    """
+
+    def __init__(self, latent_dim: int, n_channels=1, width=64, lbd=1e-10):
+        super().__init__()
+
+        self.latent_dim = latent_dim
+        self.n_channels = n_channels
+        self.width = width
+        self.lbd = lbd
+
+        self.l1 = nn.Sequential(
+            nn.Conv2d(
+                self.n_channels, 128, kernel_size=(4, 4), stride=2, padding=1
+            ),  # (B, 128, W/2, W/2)
+            nn.InstanceNorm2d(num_features=128),
+            nn.Softplus(),
+        )
+        self.l2 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=(4, 4), stride=2, padding=1),  # (B, 256, W/4, W/4)
+            nn.InstanceNorm2d(num_features=256),
+            nn.Softplus(),
+        )
+        self.l3 = nn.Sequential(
+            nn.Conv2d(256, 512, kernel_size=(4, 4), stride=2, padding=1),  # (B, 512, W/8, W/8)
+            nn.InstanceNorm2d(num_features=512),
+            nn.Softplus(),
+            nn.Flatten(1),  # Flatten to (B, 512 * W/8 * W/8)
+        )
+
+        w3 = self.get_dim_out_()
+        last_dim = 512 * w3 * w3  # Output dimension after the conv layers
+
+        k = int(self.latent_dim * (self.latent_dim - 1) / 2)
+
+        self.diag = nn.Linear(last_dim, self.latent_dim)
+        self.lower = nn.Linear(last_dim, k)
+
+        self.indices = torch.tril_indices(self.latent_dim, self.latent_dim, offset=-1)
+
+        self.layers = nn.Sequential(
+            self.l1,
+            self.l2,
+            self.l3,
+        )
+
+    def get_out_conv_dim_(self, W_in, pad, ker_size, stride) -> int:
+        """
+        Returns the output dimension of the conv layers
+        """
+        W_out = (W_in + 2 * pad - ker_size) / stride + 1
+        return torch.floor(torch.Tensor([W_out])).int()
+
+    def get_dim_out_(self) -> int:
+        """
+        Returns the output dimension of the conv layers
+        """
+        W1 = self.get_out_conv_dim_(self.width, 1, 4, 2)
+        W2 = self.get_out_conv_dim_(W1, 1, 4, 2)
+        W3 = self.get_out_conv_dim_(W2, 1, 4, 2)
+        return int(W3)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.layers(x)  # (B, 512 * W4 * W4)
+        log_diag = self.diag(x)
+        lower = self.lower(x)
+
+        L = torch.zeros(
+            x.size(0), self.latent_dim, self.latent_dim, device=x.device, dtype=x.dtype
+        )
+        L[:, self.indices[0], self.indices[1]] = lower
+        L += torch.diag_embed(log_diag.exp())
+
+        G_inv = torch.bmm(L, L.transpose(1, 2))
+
+        id = self.lbd * self.eye(G_inv[:, :, 0])
+
+        return G_inv + self.lbd * id
