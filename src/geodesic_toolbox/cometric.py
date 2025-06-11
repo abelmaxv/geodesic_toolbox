@@ -5,6 +5,10 @@ from sklearn.cluster import KMeans
 import numpy as np
 from tqdm import tqdm
 
+################################################################
+# Utils
+################################################################
+
 
 def empirical_cov_mat(x: Tensor, mu: Tensor = None, eps=1e-6):
     """Computes the empirical covariance matrix of the data x.
@@ -92,6 +96,11 @@ def SoftAbs(M, alpha=1e3):
     G = torch.bmm(torch.diag_embed(D), Q.mH)
     G = torch.bmm(Q, G)
     return G
+
+
+################################################################
+# Base Classes
+################################################################
 
 
 class CoMetric(torch.nn.Module):
@@ -290,6 +299,11 @@ class IdentityCoMetric(CoMetric):
         return f"coscale={self.coscale}"
 
 
+################################################################
+# Stand alone Cometrics
+################################################################
+
+
 class PointCarreCoMetric(CoMetric):
     """Cometric that is the pointcarre matrix, ie 0.25 * diag({1-||x||^2}^2)"""
 
@@ -310,6 +324,11 @@ class PointCarreCoMetric(CoMetric):
         norm_q_sqr = torch.linalg.vector_norm(q, dim=1) ** 2
         scalar = 1 / (1 - norm_q_sqr) ** 2
         return 4 * scalar[:, None] * p
+
+
+################################################################
+# Cometric from functions
+################################################################
 
 
 class FunctionnalHeightMapCometric(CoMetric):
@@ -513,131 +532,6 @@ class HeightMapCometric(CoMetric):
         return g_interp
 
 
-class DiagonalCometricModel(CoMetric):
-    """
-    Parametric diagonal cometric model. All diagonal values can either be different or the same depending on
-    the value of latent_dim. If latent_dim=1, all diagonal values are the same, the tensor is a scaled identity matrix.
-    Otherwise, the diagonal values are different.
-
-    Parameters:
-    in_dim : int, dimension of the input features
-    hidden_dim : int, dimension of the hidden layer
-    latent_dim : int, dimension of the latent space
-    lbd : float, regularization parameter
-    """
-
-    def __init__(self, in_dim, hidden_dim, latent_dim, lbd=1):
-        super().__init__()
-        self.in_dim = in_dim
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        self.lbd = lbd
-
-        self.layers = nn.Sequential(
-            nn.Linear(self.in_dim, self.hidden_dim),
-            nn.Tanh(),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.Tanh(),
-            nn.Linear(self.hidden_dim, self.latent_dim),
-        )
-
-    def initialize_weights(self):
-        """Initialize the weights of the model to output the euclidean distance"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                nn.init.zeros_(m.bias)
-
-        nn.init.zeros_(self.layers[-1].weight)
-        nn.init.zeros_(self.layers[-1].bias)
-
-    def forward(self, features):
-        diag_val = self.layers(features)
-        diag_val = torch.exp(diag_val)
-        G_inv = (diag_val[:, :, None] + self.lbd) * self.eye(features)
-        return G_inv
-
-    def metric(self, q: Tensor) -> Tensor:
-        diag_val = self.layers(q)
-        diag_val = torch.exp(diag_val)
-        return (1 / diag_val[:, None] + 1 / self.lbd) * self.eye(q)
-
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        diag_val = self.layers(q)
-        diag_val = torch.exp(diag_val)
-        diag_val = 1 / diag_val + 1 / self.lbd
-        return diag_val[:, None] * p
-
-    def extra_repr(self) -> str:
-        return f"in_dim={self.in_dim}, hidden_dim={self.hidden_dim}, latent_dim={self.latent_dim}, lbd={self.lbd}"
-
-
-class CometricModel(CoMetric):
-    """
-    General parametric cometric model. The cometric tensor is a symmetric positive definite matrix.
-    The parametrization here uses the Cholesky decomposition of the cometric tensor.
-
-    Parameters:
-    input_dim : int, dimension of the input features
-    hidden_dim : int, dimension of the hidden layer
-    latent_dim : int, dimension of the latent space
-    lbd : float, regularization parameter
-    """
-
-    def __init__(self, input_dim, hidden_dim, latent_dim, lbd=0.1):
-        super().__init__()
-        self.input_dim = input_dim
-        self.latent_dim = latent_dim
-        self.hidden_dim = hidden_dim
-        self.lbd = lbd
-
-        self.layers = nn.Sequential(
-            nn.Linear(self.input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-        )
-        self.diag = nn.Linear(hidden_dim, self.latent_dim)
-        k = int(self.latent_dim * (self.latent_dim - 1) / 2)
-        self.lower = nn.Linear(hidden_dim, k)
-
-        self.indices = torch.tril_indices(row=self.latent_dim, col=self.latent_dim, offset=-1)
-
-        self.initialize_weights()
-
-    def initialize_weights(self):
-        """Initialize the weights of the model to output the euclidean distance"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_normal_(m.weight)
-                nn.init.zeros_(m.bias)
-
-        nn.init.zeros_(self.diag.weight)
-        nn.init.zeros_(self.diag.bias)
-        nn.init.zeros_(self.lower.weight)
-        nn.init.zeros_(self.lower.bias)
-
-    def forward(self, features):
-        x = self.layers(features)
-        log_diag = self.diag(x)
-        lower = self.lower(x)
-
-        L = torch.zeros(
-            x.size(0), self.latent_dim, self.latent_dim, device=x.device, dtype=x.dtype
-        )
-        L[:, self.indices[0], self.indices[1]] = lower
-        L += torch.diag_embed(log_diag.exp())
-
-        G_inv = torch.bmm(L, L.transpose(1, 2))
-
-        id = self.lbd * self.eye(G_inv[:, :, 0])
-
-        return G_inv + self.lbd * id
-
-    def extra_repr(self) -> str:
-        return f"input_dim={self.input_dim}, hidden_dim={self.hidden_dim}, latent_dim={self.latent_dim}, lbd={self.lbd}"
-
-
 class DiffeoCometric(CoMetric):
     """
     Class for the cometric inherited by a diffeomorphism between a manifold and the euclidean space.
@@ -771,6 +665,11 @@ class FisherRaoCometric(CoMetric):
     def forward(self, q: torch.Tensor):
         g = self.metric(q)
         return torch.linalg.inv(g)
+
+
+################################################################
+# Interpolation cometrics
+################################################################
 
 
 class KernelCometric(CoMetric):
@@ -1111,7 +1010,7 @@ class CentroidsCometric(CoMetric):
     ):
         super().__init__()
         self.centroids = centroids
-        #@TODO: check if cometric_centroids is a valid cometric tensor
+        # @TODO: check if cometric_centroids is a valid cometric tensor
         self.cometric_centroids = cometric_centroids
 
         self.temperature = temperature
@@ -1120,58 +1019,143 @@ class CentroidsCometric(CoMetric):
     def forward(self, z: Tensor) -> Tensor:
         dz = self.centroids.unsqueeze(0) - z.unsqueeze(1)
         dz = torch.norm(dz, dim=-1)  # (m,b)
-        weights = torch.exp(-(dz**2) / (2 * self.temperature**2)).unsqueeze(-1).unsqueeze(-1)  # (m,b,1,1)
+        weights = (
+            torch.exp(-(dz**2) / (2 * self.temperature**2)).unsqueeze(-1).unsqueeze(-1)
+        )  # (m,b,1,1)
         G_inv = self.cometric_centroids.unsqueeze(0) * weights  # (m,b,d,d)
         G_inv = G_inv.sum(dim=1)  # (m,d,d)
         G_inv = G_inv + self.reg_coef * self.eye(z)  # (m,d,d)
         return G_inv
 
-class RandersMetrics(nn.Module):
-    """Randers metrics with a fixed base metric and a variable 1-form.
 
-    The 1-form must verify the condition that the resulting Randers metric is positive.
-    It is up to the user to ensure this condition is satisfied.
+#################################################################
+# Parametric cometrics
+#################################################################
 
-    Parameters
-    ----------
-    base_cometric : CoMetric
-        Base cometric to use for the Randers metric.
-    omega : nn.Module
-        1-form to use for the Randers metric. It should be a function that takes
-        in points on the manifold and outputs a vector of the same size as the points.
-    beta : float
-        Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1]. W
-        When beta=0, the Randers metric reduces to the base cometric.
+
+class DiagonalCometricModel(CoMetric):
     """
-    def __init__(self, base_cometric: CoMetric, omega: nn.Module, beta: float = 1.0):
-        super(RandersMetrics, self).__init__()
-        self.base_cometric = base_cometric
-        self.omega = omega
-        assert 0 <= beta <= 1, "Beta must be in the range [0, 1]"
-        self.beta = beta
+    Parametric diagonal cometric model. All diagonal values can either be different or the same depending on
+    the value of latent_dim. If latent_dim=1, all diagonal values are the same, the tensor is a scaled identity matrix.
+    Otherwise, the diagonal values are different.
 
-    def forward(self, x: Tensor, v: Tensor):
-        """Compute F(x,v) = |v|_{base_cometric} + beta *  omega(x) . v
+    Parameters:
+    in_dim : int, dimension of the input features
+    hidden_dim : int, dimension of the hidden layer
+    latent_dim : int, dimension of the latent space
+    lbd : float, regularization parameter
+    """
 
-        Parameters
-        ----------
-        x : torch.Tensor (b,d)
-            Points in the manifold
-        v : torch.Tensor (b,d)
-            Tangent vectors at x
+    def __init__(self, in_dim, hidden_dim, latent_dim, lbd=1):
+        super().__init__()
+        self.in_dim = in_dim
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim
+        self.lbd = lbd
 
-        Returns
-        -------
-        F : torch.Tensor (b,)
-            Randers metric at x in the direction of v
-        """
-        x_norm = torch.einsum("bi,bij,bj->b", v, self.base_cometric(x), v).sqrt()
+        self.layers = nn.Sequential(
+            nn.Linear(self.in_dim, self.hidden_dim),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Tanh(),
+            nn.Linear(self.hidden_dim, self.latent_dim),
+        )
 
-        omega_x = self.omega(x)
-        omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
+    def initialize_weights(self):
+        """Initialize the weights of the model to output the euclidean distance"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.zeros_(m.bias)
 
-        F = x_norm + self.beta * omega_x_v
-        return F
+        nn.init.zeros_(self.layers[-1].weight)
+        nn.init.zeros_(self.layers[-1].bias)
+
+    def forward(self, features):
+        diag_val = self.layers(features)
+        diag_val = torch.exp(diag_val)
+        G_inv = (diag_val[:, :, None] + self.lbd) * self.eye(features)
+        return G_inv
+
+    def metric(self, q: Tensor) -> Tensor:
+        diag_val = self.layers(q)
+        diag_val = torch.exp(diag_val)
+        return (1 / diag_val[:, None] + 1 / self.lbd) * self.eye(q)
+
+    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+        diag_val = self.layers(q)
+        diag_val = torch.exp(diag_val)
+        diag_val = 1 / diag_val + 1 / self.lbd
+        return diag_val[:, None] * p
+
+    def extra_repr(self) -> str:
+        return f"in_dim={self.in_dim}, hidden_dim={self.hidden_dim}, latent_dim={self.latent_dim}, lbd={self.lbd}"
+
+
+class CometricModel(CoMetric):
+    """
+    General parametric cometric model. The cometric tensor is a symmetric positive definite matrix.
+    The parametrization here uses the Cholesky decomposition of the cometric tensor.
+
+    Parameters:
+    input_dim : int, dimension of the input features
+    hidden_dim : int, dimension of the hidden layer
+    latent_dim : int, dimension of the latent space
+    lbd : float, regularization parameter
+    """
+
+    def __init__(self, input_dim, hidden_dim, latent_dim, lbd=0.1):
+        super().__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.lbd = lbd
+
+        self.layers = nn.Sequential(
+            nn.Linear(self.input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.diag = nn.Linear(hidden_dim, self.latent_dim)
+        k = int(self.latent_dim * (self.latent_dim - 1) / 2)
+        self.lower = nn.Linear(hidden_dim, k)
+
+        self.indices = torch.tril_indices(row=self.latent_dim, col=self.latent_dim, offset=-1)
+
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        """Initialize the weights of the model to output the euclidean distance"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.zeros_(m.bias)
+
+        nn.init.zeros_(self.diag.weight)
+        nn.init.zeros_(self.diag.bias)
+        nn.init.zeros_(self.lower.weight)
+        nn.init.zeros_(self.lower.bias)
+
+    def forward(self, features):
+        x = self.layers(features)
+        log_diag = self.diag(x)
+        lower = self.lower(x)
+
+        L = torch.zeros(
+            x.size(0), self.latent_dim, self.latent_dim, device=x.device, dtype=x.dtype
+        )
+        L[:, self.indices[0], self.indices[1]] = lower
+        L += torch.diag_embed(log_diag.exp())
+
+        G_inv = torch.bmm(L, L.transpose(1, 2))
+
+        id = self.eye(G_inv[:, :, 0])
+
+        return G_inv + self.lbd * id
+
+    def extra_repr(self) -> str:
+        return f"input_dim={self.input_dim}, hidden_dim={self.hidden_dim}, latent_dim={self.latent_dim}, lbd={self.lbd}"
 
 
 class SmallConvCometricModel(CoMetric):
@@ -1270,3 +1254,90 @@ class SmallConvCometricModel(CoMetric):
         id = self.lbd * self.eye(G_inv[:, :, 0])
 
         return G_inv + self.lbd * id
+
+
+class Cometric_MLP(CoMetric):
+    def __init__(self, input_dim: int, latent_dim: int, lbd=0.01):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.lbd = lbd
+
+        self.layers = nn.Sequential(nn.Linear(self.input_dim, 400), nn.ReLU())
+        self.diag = nn.Linear(400, self.latent_dim)
+        k = int(self.latent_dim * (self.latent_dim - 1) / 2)
+        self.lower = nn.Linear(400, k)
+
+    def forward(self, x):
+
+        h1 = self.layers(x.reshape(-1, self.input_dim))
+        h21, h22 = self.diag(h1), self.lower(h1)
+
+        L = torch.zeros((x.shape[0], self.latent_dim, self.latent_dim)).to(x.device)
+        indices = torch.tril_indices(row=self.latent_dim, col=self.latent_dim, offset=-1)
+
+        # get non-diagonal coefficients
+        L[:, indices[0], indices[1]] = h22
+
+        # add diagonal coefficients
+        L = L + torch.diag_embed(h21.exp())
+
+        M = L @ torch.transpose(L, 1, 2)  # LL^T
+
+        M = M + torch.eye(self.latent_dim).to(x.device) * self.lbd  # add regularization
+        return M
+
+
+#################################################################
+# Randers metrics
+#################################################################
+
+
+class RandersMetrics(nn.Module):
+    """Randers metrics with a fixed base metric and a variable 1-form.
+
+    The 1-form must verify the condition that the resulting Randers metric is positive.
+    It is up to the user to ensure this condition is satisfied.
+
+    Parameters
+    ----------
+    base_cometric : CoMetric
+        Base cometric to use for the Randers metric.
+    omega : nn.Module
+        1-form to use for the Randers metric. It should be a function that takes
+        in points on the manifold and outputs a vector of the same size as the points.
+    beta : float
+        Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1]. W
+        When beta=0, the Randers metric reduces to the base cometric.
+    """
+
+    def __init__(self, base_cometric: CoMetric, omega: nn.Module, beta: float = 1.0):
+        super(RandersMetrics, self).__init__()
+        self.base_cometric = base_cometric
+        self.omega = omega
+        assert 0 <= beta <= 1, "Beta must be in the range [0, 1]"
+        self.beta = beta
+
+    def forward(self, x: Tensor, v: Tensor):
+        """Compute F(x,v) = |v|_{base_cometric} + beta *  omega(x) . v
+
+        Parameters
+        ----------
+        x : torch.Tensor (b,d)
+            Points in the manifold
+        v : torch.Tensor (b,d)
+            Tangent vectors at x
+
+        Returns
+        -------
+        F : torch.Tensor (b,)
+            Randers metric at x in the direction of v
+        """
+        x_norm = torch.einsum("bi,bij,bj->b", v, self.base_cometric(x), v).sqrt()
+
+        omega_x = self.omega(x)
+        omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
+
+        F = x_norm + self.beta * omega_x_v
+        return F
