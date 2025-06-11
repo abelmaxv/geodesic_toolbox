@@ -1118,16 +1118,13 @@ class CentroidsCometric(CoMetric):
         self.reg_coef = reg_coef
 
     def forward(self, z: Tensor) -> Tensor:
-        dz = self.centroids[None, :, :] - z[:, None, :]  # (m,b,d)
-        dz = torch.linalg.norm(dz, dim=-1)  # (m,b)
-        # dz = torch.einsum("mbi,bij,mbj->mb", dz, self.cometric_centroids, dz)  # dz^T@G_inv@dz
-        weights = torch.exp(-(dz**2) / (2 * self.temperature**2))
-
-        G_inv = weights[:, :, None, None] * self.cometric_centroids[None, :, :, :]  # (m,b,d,d)
+        dz = self.centroids.unsqueeze(0) - z.unsqueeze(1)
+        dz = torch.norm(dz, dim=-1)  # (m,b)
+        weights = torch.exp(-(dz**2) / (2 * self.temperature**2)).unsqueeze(-1).unsqueeze(-1)  # (m,b,1,1)
+        G_inv = self.cometric_centroids.unsqueeze(0) * weights  # (m,b,d,d)
         G_inv = G_inv.sum(dim=1)  # (m,d,d)
         G_inv = G_inv + self.reg_coef * self.eye(z)  # (m,d,d)
         return G_inv
-
 
 class RandersMetrics(nn.Module):
     """Randers metrics with a fixed base metric and a variable 1-form.
