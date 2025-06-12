@@ -1003,8 +1003,8 @@ class CentroidsCometric(CoMetric):
 
     def __init__(
         self,
-        centroids: Tensor=None,
-        cometric_centroids: Tensor=None,
+        centroids: Tensor = None,
+        cometric_centroids: Tensor = None,
         temperature: float = 1.0,
         reg_coef: float = 1e-3,
     ):
@@ -1017,13 +1017,13 @@ class CentroidsCometric(CoMetric):
         self.register_buffer("temperature", torch.tensor(temperature))
         self.register_buffer("reg_coef", torch.tensor(reg_coef))
 
-    def load_state_dict(self, state_dict, strict = True, assign = False):
+    def load_state_dict(self, state_dict, strict=True, assign=False):
         # Just to accomodate loading a state_dict with centroids and cometric_centroids
         if "centroids" in state_dict and not hasattr(self, "centroids"):
             self.register_buffer("centroids", state_dict["centroids"])
         if "cometric_centroids" in state_dict and not hasattr(self, "cometric_centroids"):
             self.register_buffer("cometric_centroids", state_dict["cometric_centroids"])
-            
+
         return super().load_state_dict(state_dict, strict, assign)
 
     def forward(self, z: Tensor) -> Tensor:
@@ -1267,10 +1267,10 @@ class SmallConvCometricModel(CoMetric):
 
 
 class Cometric_MLP(CoMetric):
-    def __init__(self, input_dim: int, latent_dim: int, lbd=0.01):
+    def __init__(self, input_dim, latent_dim: int, lbd=0.01):
         super().__init__()
 
-        self.input_dim = input_dim
+        self.input_dim = np.prod(input_dim) if isinstance(input_dim, tuple) else input_dim
         self.latent_dim = latent_dim
         self.lbd = lbd
 
