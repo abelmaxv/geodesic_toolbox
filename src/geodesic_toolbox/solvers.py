@@ -57,10 +57,20 @@ class GeodesicDistanceSolver(torch.nn.Module):
         segments = traj_front - traj_back
         midpoints = (traj_front + traj_back) / 2
 
+
+        # # This version uses way too much memory
+        # segments = rearrange(segments, "b n d -> (b n) d")
+        # midpoints = rearrange(midpoints, "b n d -> (b n) d")
+        # distances = self.cometric.inverse_forward(midpoints, segments)  # (b*n, d)
+        # distances = torch.einsum("B d, B d -> B", segments, distances)  # (b*n,)
+        # distances = rearrange(distances, "(b n) -> b n", b=traj_q.shape[0])
+
+        # This version is more memory efficient but slower
         distances = torch.stack(
             [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
         )  # Forward per batch, could be slightly faster but whatever
         distances = torch.einsum("bni,bni->bn", segments, distances)
+
         # Add a ReLU to avoid negative distances due to numerical errors
         distances = distances.relu().sqrt().sum(dim=1)
         return distances
@@ -956,7 +966,8 @@ class SolverGraph(GeodesicDistanceSolver):
             The KNN object
         """
         # We add one to the number of neighbors to remove the point itself
-        knn = NearestNeighbors(n_neighbors=n_neighbors + 1, algorithm="ball_tree")
+        print("Fitting KNN graph...")
+        knn = NearestNeighbors(n_neighbors=n_neighbors + 1, algorithm="ball_tree", n_jobs=-1)
         knn.fit(data.cpu())
         t = torch.arange(0, 1, self.dt, device=data.device).view(1, 1, -1, 1)
 
