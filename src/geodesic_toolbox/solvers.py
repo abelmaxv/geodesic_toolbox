@@ -1561,7 +1561,7 @@ class SolverGraphRanders(torch.nn.Module):
         distances = torch.stack(
             [self.randers_metric(m,seg) for m, seg in zip(traj, tangent_vectors)]
         ) # (B, T)
-        distances = distances.relu().sqrt().sum(dim=1)  # (B,)
+        distances = distances.relu().sum(dim=1)  # (B,)
         return distances
 
     def get_similarity_matrix(self, W, sigma=1):
@@ -1672,8 +1672,7 @@ class SolverGraphRanders(torch.nn.Module):
             linear_traj = self.linear_interpolation(
                 q0b, q0b_neigh, t
             )  # (n_neighbors, n_pts, d)
-            tangent_vectors = (q0b_neigh - q0b).repeat(self.T, 1, 1)  # (n_neighbors, n_pts, d)
-
+            tangent_vectors = (q0b_neigh - q0b)[:,None,:].repeat(1,self.T,1)  # (n_neighbors, n_pts, d)
             dst_to_q0b = self.compute_distance(linear_traj, tangent_vectors)  # (n_neighbors,)
             argmin_length = torch.argmin(dst_to_q0b)
             closest_q0[b] = ind0[b, argmin_length]
@@ -1683,7 +1682,7 @@ class SolverGraphRanders(torch.nn.Module):
             linear_traj = self.linear_interpolation(
                 q1b, q1b_neigh, t
             )  # (n_neighbors, n_pts, d)
-            tangent_vectors = (q1b_neigh - q1b).repeat(self.T, 1, 1)  # (n_neighbors, n_pts, d)
+            tangent_vectors = (q1b_neigh - q1b)[:,None,:].repeat(1,self.T,1)  # (n_neighbors, n_pts, d)
             dst_to_q1b = self.compute_distance(linear_traj, tangent_vectors)  # (n_neighbors,)
             argmin_length = torch.argmin(dst_to_q1b)
             closest_q1[b] = ind1[b, argmin_length]
