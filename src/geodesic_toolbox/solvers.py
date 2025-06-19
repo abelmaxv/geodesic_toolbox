@@ -1558,13 +1558,11 @@ class SolverGraphRanders(torch.nn.Module):
         dst : torch.Tensor (b,)
             The distance between the two points
         """
-        # Compute the distance using the Randers metric
-        traj_ = rearrange(traj, "b T d -> (b T) d")
-        tangent_vectors = rearrange(tangent_vectors, "b T d -> (b T) d")
-        dst = self.randers_metric(traj_, tangent_vectors)  # (b*T,)
-        dst = rearrange(dst, "(b T) -> b T", b=traj.shape[0])
-        dst = dst.sum(dim=1)  # (b,)
-        return dst
+        distances = torch.stack(
+            [self.randers_metric(m,seg) for m, seg in zip(traj, tangent_vectors)]
+        ) # (B, T)
+        distances = distances.relu().sqrt().sum(dim=1)  # (B,)
+        return distances
 
     def get_similarity_matrix(self, W, sigma=1):
         """Compute the similarity matrix using the weight matrix W
