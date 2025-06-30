@@ -91,7 +91,7 @@ class Sampler(nn.Module):
                 new_samples.append(z_new)
             new_samples = torch.stack(new_samples, dim=0)
 
-        acceptance_rate = torch.mean(torch.stack(acceptance_rate)).item()
+        acceptance_rate = torch.Tensor(acceptance_rate).mean().item()
 
         if return_acceptance:
             return new_samples, acceptance_rate
