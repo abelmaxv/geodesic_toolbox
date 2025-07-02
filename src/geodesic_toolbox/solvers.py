@@ -1871,7 +1871,6 @@ class SolverGraphRanders(torch.nn.Module):
         return dst
 
 
-from geodesic_toolbox.solvers import GeodesicDistanceSolver
 
 
 class GEORCE(GeodesicDistanceSolver):
@@ -2080,6 +2079,7 @@ class GEORCE(GeodesicDistanceSolver):
         x_t_0: Tensor (T-1, d), optional
             The initial guess of the geodesic trajectory points. If None, it will be computed
             as a linear interpolation between x_0 and x_T.
+            It must not contain x_0 and x_T.
 
         Returns:
         -------
@@ -2102,7 +2102,7 @@ class GEORCE(GeodesicDistanceSolver):
             t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
             x_t_0 = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, d)
         else:
-            assert x_t_0.shape == (self.T - 1, d), f"x_t_0 must have shape {(self.T - 1, d)=} got {x_t_0.shape=}"
+            assert x_t_0.shape == (self.T - 1, d), f"x_t_0 must have shape {(self.T - 1, d)=} got {x_t_0.shape=}. But sure to exclude x_0 and x_T."
 
 
         G_inv_0 = self.cometric(x_0[None, :]).squeeze(0)
@@ -2187,7 +2187,7 @@ class GEORCE(GeodesicDistanceSolver):
     def get_trajectories(self, x_0: Tensor, x_1: Tensor,x_t_0:Tensor=None) -> Tensor:
         """Given the start and end points, compute the geodesic path between the two.
 
-        Paramseters:
+        Parameters:
         ----------
         x_0: Tensor (B, d)
             The starting points of the geodesic.
@@ -2196,6 +2196,7 @@ class GEORCE(GeodesicDistanceSolver):
         x_t_0: Tensor (B,T-1, d), optional
             The initial guess of the geodesic trajectory points. If None, it will be computed
             as a linear interpolation between x_0 and x_1.
+            It must not contain x_0 and x_1.
 
         Returns:
         -------
@@ -2227,7 +2228,7 @@ class GEORCE(GeodesicDistanceSolver):
         x_t_0: Tensor (B,T-1, d), optional
             The initial guess of the geodesic trajectory points. If None, it will be computed
             as a linear interpolation between x_0 and x_1.
-            It must not contain x_0 and 
+            It must not contain x_0 and x_T
 
         Returns:
         -------
