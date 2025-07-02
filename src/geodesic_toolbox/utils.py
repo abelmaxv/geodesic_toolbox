@@ -273,6 +273,7 @@ def get_mf_image(
     use_mf_metric: bool = False,
     max_b_size: int = 512,
     verbose=True,
+    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
 ) -> torch.Tensor:
     """
     Compute the magnification factor on the latent space so as to visualize the distortion of the space.
@@ -305,13 +306,16 @@ def get_mf_image(
         bounds = get_bounds(embeddings)
     min_x, max_x, min_y, max_y = bounds
 
+    if embeddings is not None:
+        device = embeddings.device
+
     x_plot = torch.linspace(min_x, max_x, resolution)
     y_plot = torch.linspace(min_y, max_y, resolution)
     xx, yy = torch.meshgrid(x_plot, y_plot, indexing="ij")
     Q = torch.stack([xx, yy], dim=-1)
     W, H, _ = Q.shape
     Q = rearrange(Q, "w h c -> (w h) c")
-    mf_image = torch.zeros(W * H, device=embeddings.device)
+    mf_image = torch.zeros(W * H, device=device)
     fn = magnification_factor_metric if use_mf_metric else magnification_factor
     if not verbose:
         pbar = range(0, W * H, max_b_size)
@@ -325,9 +329,7 @@ def get_mf_image(
     with torch.no_grad():
         # batch computation to avoid memory issues
         for i in pbar:
-            mf_image[i : i + max_b_size] = fn(
-                cometric, Q[i : i + max_b_size].to(embeddings.device)
-            )
+            mf_image[i : i + max_b_size] = fn(cometric, Q[i : i + max_b_size].to(device))
     mf_image = rearrange(mf_image, "(w h) -> w h", w=W, h=H).T
     return mf_image.cpu()
 
