@@ -1929,9 +1929,9 @@ class GEORCE(GeodesicDistanceSolver):
         energy: Tensor
             The total energy of the geodesic trajectory.
         """
-        traj = torch.cat([z0[None, :], z_t, zT[None, :]], dim=0)  # (T+1, 2)
-        dx = traj[1:] - traj[:-1]  # (T, 2)
-        G = self.cometric(traj[:-1]).inverse()  # (T, 2, 2)
+        traj = torch.cat([z0[None, :], z_t, zT[None, :]], dim=0)  # (T+1, d)
+        dx = traj[1:] - traj[:-1]  # (T, d)
+        G = self.cometric(traj[:-1]).inverse()  # (T, d, d)
         energy = torch.einsum("ti,tij,tj->t", dx, G, dx)  # (T,)
         return energy.sum()
 
@@ -1964,27 +1964,27 @@ class GEORCE(GeodesicDistanceSolver):
 
         Parameters:
 
-        v_t: Tensor (T-1, 2)
+        v_t: Tensor (T-1, d)
             The gradient of the energy at each time step.
-        G_inv_t: Tensor (T, 2, 2)
+        G_inv_t: Tensor (T, d, d)
             The inverse of the cometric at each time step.
-        diff: Tensor (2,)
+        diff: Tensor (d,)
             The difference between the end points zT and z0.
 
         Returns:
         -------
-        mu_t: Tensor (T, 2)
+        mu_t: Tensor (T, d)
             The optimal mu_t for the geodesic trajectory.
         """
         v_cumsum = torch.cumsum(v_t.flip(0), dim=0).flip(0)
-        G_inv_sum = torch.sum(G_inv_t, dim=0)  # (2, 2)
+        G_inv_sum = torch.sum(G_inv_t, dim=0)  # (d, d)
         rhs = torch.einsum("tij,tj->ti", G_inv_t[:-1], v_cumsum)
         rhs = rhs.sum(dim=0) + 2.0 * diff
 
         # Solve the linear system
-        mu_T = -torch.linalg.solve(G_inv_sum, rhs)  # (2,)
-        mu_t = torch.cat([mu_T[None, :] + v_cumsum, mu_T[None, :]], dim=0)  # (T, 2)
-        return mu_t  # (T, 2)
+        mu_T = -torch.linalg.solve(G_inv_sum, rhs)  # (d,)
+        mu_t = torch.cat([mu_T[None, :] + v_cumsum, mu_T[None, :]], dim=0)  # (T, d)
+        return mu_t  # (T, d)
 
     def line_search(self, x_0, x_T, u_t, u_t_i, x_t_i):
         """
@@ -2066,6 +2066,7 @@ class GEORCE(GeodesicDistanceSolver):
         self,
         x_0: Tensor,
         x_T: Tensor,
+        x_t_0: Tensor = None,
     ):
         """
         Solve the geodesic equation using the GEORCE algorithm.
@@ -2076,6 +2077,9 @@ class GEORCE(GeodesicDistanceSolver):
             The starting point of the geodesic.
         x_T: Tensor (d,)
             The ending point of the geodesic.
+        x_t_0: Tensor (T-1, d), optional
+            The initial guess of the geodesic trajectory points. If None, it will be computed
+            as a linear interpolation between x_0 and x_T.
 
         Returns:
         -------
@@ -2092,19 +2096,24 @@ class GEORCE(GeodesicDistanceSolver):
         """
         # Initialize everything
         i = 0
-        t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
+        d = x_0.shape[0]
 
-        x_t_0 = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, 2)
+        if x_t_0 is None:
+            t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
+            x_t_0 = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, d)
+        else:
+            assert x_t_0.shape == (self.T - 1, d), f"x_t_0 must have shape {(self.T - 1, d)=} got {x_t_0.shape=}"
+
 
         G_inv_0 = self.cometric(x_0[None, :]).squeeze(0)
         G_0 = G_inv_0.inverse()
 
         diff = x_T - x_0
 
-        x_t_i = x_t_0.clone().requires_grad_(True)  # (T-1, 2), not including x_0 and x_T
+        x_t_i = x_t_0.clone().requires_grad_(True)  # (T-1, d), not including x_0 and x_T
         u_t_i = (
-            diff * torch.ones(self.T, 2) / self.T
-        )  # (T, 2) Initial guess of the velocity, not including x_T
+            diff * torch.ones(self.T, d) / self.T
+        )  # (T, d) Initial guess of the velocity, not including x_T
 
         # L4
         grad_E_t = self.grad_E(x_t_i, x_0, x_T)
@@ -2120,11 +2129,11 @@ class GEORCE(GeodesicDistanceSolver):
         while (norm_grad_E_t > self.tol) & (i < self.max_iter):
             # L5
             G_inv_t = self.cometric(x_t_i)
-            G_inv_t = torch.cat([G_inv_0[None, :], G_inv_t], dim=0)  # (T, 2, 2)
-            G_t = G_inv_t.inverse()  # (T, 2, 2)
+            G_inv_t = torch.cat([G_inv_0[None, :], G_inv_t], dim=0)  # (T, d, d)
+            G_t = G_inv_t.inverse()  # (T, d, d)
 
             # L6
-            v_t = torch.einsum("td, tji, ti -> tj", u_t_i[1:], G_t[1:], u_t_i[1:])  # (T-1, 2)
+            v_t = torch.einsum("td, tji, ti -> tj", u_t_i[1:], G_t[1:], u_t_i[1:])  # (T-1, d)
             v_t = torch.autograd.grad(
                 v_t.sum(),
                 x_t_i,
@@ -2132,10 +2141,10 @@ class GEORCE(GeodesicDistanceSolver):
             )[0]
 
             # L7
-            mu_t = self.get_mut_t(v_t, G_inv_t, diff)  # (T, 2)
+            mu_t = self.get_mut_t(v_t, G_inv_t, diff)  # (T, d)
 
             # L8
-            u_t = -0.5 * torch.einsum("tij,tj->ti", G_inv_t, mu_t)  # (T, 2)
+            u_t = -0.5 * torch.einsum("tij,tj->ti", G_inv_t, mu_t)  # (T, d)
 
             # L9/19
             alpha = self.line_search(x_0, x_T, u_t, u_t_i, x_t_i)
@@ -2145,7 +2154,7 @@ class GEORCE(GeodesicDistanceSolver):
             u_t_i = alpha * u_t + (1 - alpha) * u_t_i
 
             # L12
-            x_t_i = x_0 + torch.cumsum(u_t_i[:-1], dim=0)  # (T-1, 2)
+            x_t_i = x_0 + torch.cumsum(u_t_i[:-1], dim=0)  # (T-1, d)
 
             # Prepare stop condition, ie L4
             grad_E_t = self.grad_E(x_t_i, x_0, x_T)
@@ -2169,13 +2178,13 @@ class GEORCE(GeodesicDistanceSolver):
             )
             pbar.update(1)
 
-        x_final = torch.cat([x_0[None, :], x_t_i, x_T[None, :]], dim=0)  # (T+1, 2)
+        x_final = torch.cat([x_0[None, :], x_t_i, x_T[None, :]], dim=0)  # (T+1, d)
         dst_list = torch.tensor(dst_list)
         norm_gE_list = torch.tensor(norm_gE_list)
         E_list = torch.tensor(E_list)
         return x_final, dst_list, norm_gE_list, E_list, alpha_list
 
-    def get_trajectories(self, x_0: Tensor, x_1: Tensor) -> Tensor:
+    def get_trajectories(self, x_0: Tensor, x_1: Tensor,x_t_0:Tensor=None) -> Tensor:
         """Given the start and end points, compute the geodesic path between the two.
 
         Paramseters:
@@ -2184,6 +2193,9 @@ class GEORCE(GeodesicDistanceSolver):
             The starting points of the geodesic.
         x_1: Tensor (B, d)
             The ending points of the geodesic.
+        x_t_0: Tensor (B,T-1, d), optional
+            The initial guess of the geodesic trajectory points. If None, it will be computed
+            as a linear interpolation between x_0 and x_1.
 
         Returns:
         -------
@@ -2194,12 +2206,15 @@ class GEORCE(GeodesicDistanceSolver):
         B, d = x_0.shape
         assert x_1.shape == (B, d), f"Both tensors must have the same shape {(B, d)=}"
         for b in range(B):
-            x_final, _, _, _, _ = self.georce_solver(x_0[b], x_1[b])
+            if x_t_0 is not None:
+                x_final, _, _, _, _ = self.georce_solver(x_0[b], x_1[b], x_t_0=x_t_0[b])
+            else:
+                x_final, _, _, _, _ = self.georce_solver(x_0[b], x_1[b])
             trajectories.append(x_final)
         trajectories = torch.stack(trajectories, dim=0)  # (B, T+1, d)
         return trajectories
 
-    def forward(self, x_0: Tensor, x_T: Tensor) -> Tensor:
+    def forward(self, x_0: Tensor, x_T: Tensor,x_t_0:Tensor=None) -> Tensor:
         """
         Compute the geodesic distance between two points x_0 and x_T.
 
@@ -2209,6 +2224,10 @@ class GEORCE(GeodesicDistanceSolver):
             The starting points of the geodesic.
         x_T: Tensor (B, d)
             The ending points of the geodesic.
+        x_t_0: Tensor (B,T-1, d), optional
+            The initial guess of the geodesic trajectory points. If None, it will be computed
+            as a linear interpolation between x_0 and x_1.
+            It must not contain x_0 and 
 
         Returns:
         -------
@@ -2221,6 +2240,9 @@ class GEORCE(GeodesicDistanceSolver):
         dst = torch.zeros(B, device=x_0.device)
 
         for b in range(B):
-            x_final, _, _, _, _ = self.georce_solver(x_0[b], x_T[b])
+            if x_t_0 is not None:
+                x_final, _, _, _, _ = self.georce_solver(x_0[b], x_T[b], x_t_0=x_t_0[b])
+            else:
+                x_final, _, _, _, _ = self.georce_solver(x_0[b], x_T[b])
             dst[b] = self.dst_func(x_0[b], x_T[b], x_final[1:-1])
         return dst
