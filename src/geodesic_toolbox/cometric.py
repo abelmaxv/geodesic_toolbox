@@ -1330,7 +1330,7 @@ class RandersMetrics(nn.Module):
         self.beta = beta
 
     def forward(self, x: Tensor, v: Tensor):
-        """Compute F(x,v) = |v|_{base_cometric} + beta *  omega(x) . v
+        """Compute F(x,v) = |v|_{G} + beta *  omega(x) . v
 
         Parameters
         ----------
@@ -1344,10 +1344,58 @@ class RandersMetrics(nn.Module):
         F : torch.Tensor (b,)
             Randers metric at x in the direction of v
         """
-        x_norm = torch.einsum("bi,bij,bj->b", v, self.base_cometric(x), v).sqrt()
+        x_norm = torch.einsum("bi,bij,bj->b", v, self.base_cometric(x).inverse(), v).sqrt()
 
         omega_x = self.omega(x)
         omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
 
         F = x_norm + self.beta * omega_x_v
         return F
+
+    def fundamental_tensor(self, x: Tensor, v: Tensor):
+        """
+        Computes the fundamental tensor of the Randers metric
+        at the point x in the direction v.
+        g_ij(x,y) = d^2F^2(x,y)/(dy_i*dy_j)
+
+        Parameters:
+        ----------
+        x : torch.Tensor (b,d)
+            Points in the manifold
+        v : torch.Tensor (b,d)
+            Tangent vectors at x
+
+        Returns:
+        -------
+        g : torch.Tensor (b,d,d)
+            Fundamental tensor of the Randers metric at x in the direction of v
+        """
+        # def g(x1,v2):
+        #     F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
+        #     g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
+        #     return g_hessian(v2)
+
+        # G = torch.vmap(g)
+        # return G(x, v)
+
+        alpha = self.base_cometric(x).inverse()
+        beta = self.beta * self.omega(v)
+
+        x_norm = torch.einsum("bi,bij,bj->b", v, alpha, v).sqrt()
+        omega_x_v = torch.einsum("bi,bi->b", beta, v)
+        F = x_norm + omega_x_v
+        F = F[:, None, None]  # Reshape to (b,1,1)
+
+        alpha_tilde = torch.einsum("bij, bj-> bi", alpha, v)
+        v_norm = torch.einsum("bi,bij,bj->b", v, alpha, v).sqrt()[:, None, None] + 1e-8
+
+        alpha_alpha_t = torch.einsum("bi,bj->bij", alpha_tilde, alpha_tilde)
+
+        lhs_term = F / v_norm * (alpha - 1 / v_norm**2 * alpha_alpha_t)
+
+        rhs_term = 1 / v_norm.squeeze(-1) * alpha_tilde + beta
+        rhs_term = torch.einsum("bi,bj->bij", rhs_term, rhs_term)
+
+        g = lhs_term + rhs_term
+
+        return g
