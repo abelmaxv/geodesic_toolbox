@@ -1304,6 +1304,34 @@ class Cometric_MLP(CoMetric):
 #################################################################
 
 
+class ToyFinslerMetric(nn.Module):
+    """
+    This is a valid metric see:
+    https://doi.org/10.1016/j.aim.2005.06.007
+    """
+
+    def __init__(self, lbd: float = 1):
+        super().__init__()
+        self.lbd = lbd
+        self.lbd2 = lbd**2
+
+    def forward(self, x: Tensor, v: Tensor):
+        x_norm = torch.linalg.vector_norm(x, dim=-1)
+        v_norm = torch.linalg.vector_norm(v, dim=-1)
+        xv = torch.einsum("bi,bi->b", x, v)
+        F = 1 / (v_norm + 1e-8) * (1 + self.lbb2 * x_norm**2 + self.lbd2 * xv**2)
+        return F
+
+    def fundamental_tensor(self, x: Tensor, v: Tensor):
+        def g(x1, v2):
+            F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
+            g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
+            return g_hessian(v2)
+
+        G = torch.vmap(g)
+        return G(x, v)
+
+
 class RandersMetrics(nn.Module):
     """Randers metrics with a fixed base metric and a variable 1-form.
 
@@ -1320,14 +1348,23 @@ class RandersMetrics(nn.Module):
     beta : float
         Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1]. W
         When beta=0, the Randers metric reduces to the base cometric.
+    use_grad_g : bool
+        If True, the fundamental tensor is computed using autograd. Else, it is computed using the formula.
     """
 
-    def __init__(self, base_cometric: CoMetric, omega: nn.Module, beta: float = 1.0):
+    def __init__(
+        self,
+        base_cometric: CoMetric,
+        omega: nn.Module,
+        beta: float = 1.0,
+        use_grad_g: bool = True,
+    ):
         super(RandersMetrics, self).__init__()
         self.base_cometric = base_cometric
         self.omega = omega
         assert 0 <= beta <= 1, "Beta must be in the range [0, 1]"
         self.beta = beta
+        self.use_grad_g = use_grad_g
 
     def forward(self, x: Tensor, v: Tensor):
         """Compute F(x,v) = |v|_{G} + beta *  omega(x) . v
@@ -1352,32 +1389,16 @@ class RandersMetrics(nn.Module):
         F = x_norm + self.beta * omega_x_v
         return F
 
-    def fundamental_tensor(self, x: Tensor, v: Tensor):
-        """
-        Computes the fundamental tensor of the Randers metric
-        at the point x in the direction v.
-        g_ij(x,y) = d^2F^2(x,y)/(dy_i*dy_j)
+    def fund_tensor_grad_(self, x: Tensor, v: Tensor):
+        def g(x1, v2):
+            F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
+            g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
+            return g_hessian(v2)
 
-        Parameters:
-        ----------
-        x : torch.Tensor (b,d)
-            Points in the manifold
-        v : torch.Tensor (b,d)
-            Tangent vectors at x
-
-        Returns:
-        -------
-        g : torch.Tensor (b,d,d)
-            Fundamental tensor of the Randers metric at x in the direction of v
-        """
-        # def g(x1,v2):
-        #     F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
-        #     g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
-        #     return g_hessian(v2)
-
-        # G = torch.vmap(g)
-        # return G(x, v)
-
+        G = torch.vmap(g)
+        return G(x, v)
+    
+    def fund_tensor_analytic_(self, x: Tensor, v: Tensor):
         alpha = self.base_cometric(x).inverse()
         beta = self.beta * self.omega(v)
 
@@ -1399,3 +1420,29 @@ class RandersMetrics(nn.Module):
         g = lhs_term + rhs_term
 
         return g
+
+
+    def fundamental_tensor(self, x: Tensor, v: Tensor):
+        """
+        Computes the fundamental tensor of the Randers metric
+        at the point x in the direction v.
+        g_ij(x,y) = d^2F^2(x,y)/(dy_i*dy_j)
+
+        I don't know why but this is not very consistent with the autograd results.
+
+        Parameters:
+        ----------
+        x : torch.Tensor (b,d)
+            Points in the manifold
+        v : torch.Tensor (b,d)
+            Tangent vectors at x
+
+        Returns:
+        -------
+        g : torch.Tensor (b,d,d)
+            Fundamental tensor of the Randers metric at x in the direction of v
+        """
+        if self.use_grad_g:
+            return self.fund_tensor_grad_(x, v)
+        else:
+            return self.fund_tensor_analytic_(x, v)
