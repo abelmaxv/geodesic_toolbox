@@ -1959,7 +1959,14 @@ class GEORCE(GeodesicDistanceSolver):
     """
 
     def __init__(
-        self, cometric, T=100, max_iter=100, tol=1e-4, rho=0.5, c=0.9, alpha_0: float = 1.0
+        self,
+        cometric,
+        T=100,
+        max_iter=100,
+        tol=1e-4,
+        rho=0.5,
+        c=0.9,
+        alpha_0: float = 1.0,
     ):
         super().__init__()
         self.cometric = cometric
@@ -2173,7 +2180,7 @@ class GEORCE(GeodesicDistanceSolver):
 
         x_t_i = x_t_0.clone().requires_grad_(True)  # (T-1, d), not including x_0 and x_T
         u_t_i = (
-            diff * torch.ones(self.T, d) / self.T
+            diff * torch.ones(self.T, d, device=x_0.device) / self.T
         )  # (T, d) Initial guess of the velocity, not including x_T
 
         # L4
@@ -2340,7 +2347,7 @@ class GEORCERanders(torch.nn.Module):
 
     def __init__(
         self,
-        randers:RandersMetrics,
+        randers: RandersMetrics,
         T=100,
         max_iter=100,
         tol=1e-4,
@@ -2625,7 +2632,7 @@ class GEORCERanders(torch.nn.Module):
         # (T-1, d), not including x_0 and x_T
         x_t_i = x_t_0.clone().requires_grad_(True)
         # (T, d) Initial guess of the velocity, not including x_T
-        u_t_i = diff * torch.ones(self.T, d) / self.T
+        u_t_i = diff * torch.ones(self.T, d, device=x_0.device) / self.T
 
         G_0 = self.randers.fundamental_tensor(x_0[None, :], u_t_i[0, :].unsqueeze(0)).squeeze(
             0
@@ -2678,6 +2685,7 @@ class GEORCERanders(torch.nn.Module):
             )[0]
             # (T-1, d)
             norm_grad_E_t = torch.linalg.vector_norm(grad_E_t.reshape(-1))
+            i += 1
 
             # Logging
             dst = self.dst_func(x_0, x_T, x_t_i).item()
@@ -2768,3 +2776,112 @@ class GEORCERanders(torch.nn.Module):
                 x_final, _, _, _, _ = self.georce_solver(x_0[b], x_T[b])
             dst[b] = self.dst_func(x_0[b], x_T[b], x_final[1:-1])
         return dst
+
+
+class SolverGraphGEORCE(GeodesicDistanceSolver):
+    """
+    Chained solver. First the initial trajectory are computed using
+    a graph based approach. Then they are refined using the GEORCE solver.
+    """
+
+    def __init__(
+        self,
+        cometric: CoMetric,
+        data: torch.Tensor,
+        n_neighbors: int,
+        batch_size: int = 64,
+        T: int = 100,
+        max_iter=100,
+        tol=1e-10,
+        rho=0.5,
+        c=0.9,
+        alpha_0: float = 1.0,
+    ):
+        super().__init__(cometric=cometric)
+        dt = 1.0 / T
+        self.graph_solver = SolverGraph(
+            cometric=cometric,
+            data=data,
+            n_neighbors=n_neighbors,
+            dt=dt,
+            batch_size=batch_size,
+        )
+        self.georce_solver = GEORCE(
+            cometric=cometric,
+            T=T,
+            max_iter=max_iter,
+            tol=tol,
+            rho=rho,
+            c=c,
+            alpha_0=alpha_0,
+        )
+
+    def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
+        """Given the start and end points, compute the geodesic path between the two.
+
+        Params:
+        q0 : Tensor (b,d), start points.
+        q1 : Tensor (b,d), end points
+
+        Output:
+        traj_q : Tensor (b,n_pts,dim), points on the trajectory
+        """
+        pts_on_traj_graph = self.graph_solver.get_trajectories(q0, q1, connect_euclidean=True)
+        pts_on_traj_georce = self.georce_solver.get_trajectories(
+            q0, q1, pts_on_traj_graph[:, 1:-2, :].clone().detach()
+        )
+        return pts_on_traj_georce
+
+
+class SolverGraphGEORCERanders(GEORCERanders):
+    """
+    Chained solver. First the initial trajectory are computed using
+    a graph based approach. Then they are refined using the GEORCE solver.
+    """
+
+    def __init__(
+        self,
+        randers: RandersMetrics,
+        data: torch.Tensor,
+        n_neighbors: int,
+        batch_size: int = 64,
+        T: int = 100,
+        max_iter=100,
+        tol=1e-10,
+        rho=0.5,
+        c=0.9,
+        alpha_0: float = 1.0,
+    ):
+        super().__init__(
+            randers=randers,
+            T=T,
+            max_iter=max_iter,
+            tol=tol,
+            rho=rho,
+            c=c,
+            alpha_0=alpha_0,
+        )
+        dt = 1.0 / T
+        self.graph_solver = SolverGraphRanders(
+            randers_metric=randers,
+            data=data,
+            n_neighbors=n_neighbors,
+            dt=dt,
+            batch_size=batch_size,
+        )
+
+    def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
+        """Given the start and end points, compute the geodesic path between the two.
+
+        Params:
+        q0 : Tensor (b,d), start points.
+        q1 : Tensor (b,d), end points
+
+        Output:
+        traj_q : Tensor (b,n_pts,dim), points on the trajectory
+        """
+        pts_on_traj_graph = self.graph_solver.get_trajectories(q0, q1, connect_euclidean=True)
+        pts_on_traj_georce = super().get_trajectories(
+            q0, q1, pts_on_traj_graph[:, 1:-2, :].detach()
+        )
+        return pts_on_traj_georce
