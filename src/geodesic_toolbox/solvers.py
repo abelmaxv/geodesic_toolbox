@@ -10,6 +10,7 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 from scipy.interpolate import CubicSpline
+from networkx import Graph, DiGraph, is_connected, is_strongly_connected, is_weakly_connected
 
 from .cometric import CoMetric, IdentityCoMetric, RandersMetrics
 from .utils import (
@@ -996,7 +997,25 @@ class SolverGraph(GeodesicDistanceSolver):
                 Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length.cpu()
 
         W = 0.5 * (Weight_matrix + Weight_matrix.T)
+
+        self.check_graph_validity(W)
+
         return W, knn
+
+    def check_graph_validity(self, W: np.ndarray):
+        """Check if the graph is valid, i.e. if it is symmetric and has no negative weights."""
+        if not np.allclose(W, W.T):
+            raise ValueError("The weight matrix is not symmetric.")
+        if np.any(W < 0):
+            raise ValueError("The weight matrix has negative weights.")
+        G = Graph(W)
+        if not is_connected(G):
+            print(
+                "The graph is not connected. "
+                "Either the data is not connected. Then this solver will fail to find "
+                "trajectories between points from different connected components. "
+                "Or the number of neighbors is too small. Try increasing n_neighbors."
+            )
 
     def get_similarity_matrix(self, W, sigma=1):
         """Compute the similarity matrix using the weight matrix W
@@ -1485,7 +1504,8 @@ class SolverGraphRanders(torch.nn.Module):
 
     def init_knn_graph(
         self, data: torch.Tensor, n_neighbors: int, b_size: int = 64
-    ) -> torch.Tensor:
+    ) -> tuple[np.ndarray, NearestNeighbors]:
+
         """Initialize the graph using a KNN graph.
 
         Parameters
@@ -1539,7 +1559,48 @@ class SolverGraphRanders(torch.nn.Module):
                 Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length.cpu()
 
         # W = 0.5 * (Weight_matrix + Weight_matrix.T)
+        strongly_connect, weakly_connect = self.check_graph_validity(Weight_matrix)
+
+        if not strongly_connect and weakly_connect:
+            # @TODO : force the connectivity of the graph. At least for when the graph is weakly connected.
+            # ie. If weakly connected, then we should add edges between the components.
+            ...
+
         return Weight_matrix, knn
+
+    def check_graph_validity(self, W: np.ndarray)->tuple[bool, bool]:
+        """Check if the graph is strongly connected and has no negative weights.
+
+        Parameters:
+        ----------
+        W : np.ndarray (N,N)
+            The weight matrix of the graph
+
+        Raises:
+        ValueError: If the graph is not strongly connected or has negative weights.
+        """
+        if np.any(W < 0):
+            raise ValueError("The weight matrix has negative weights.")
+        G = Graph = DiGraph(W)
+        strongly_connect = True 
+        weakly_connect = True
+        if not is_strongly_connected(Graph):
+            print(
+                "The graph is not strongly connected. "
+                "Either the data is not connected. Then this solver will fail to find "
+                "trajectories between points from different connected components. "
+                "Or the number of neighbors is too small. Try increasing n_neighbors."
+            )
+            strongly_connect = False
+        elif not is_weakly_connected(G):
+            print(
+                "The graph is not weakly connected. "
+                "Either the data is not connected. Then this solver will fail to find "
+                "trajectories between points from different connected components depending on the direction. "
+                "Or the number of neighbors is too small. Try increasing n_neighbors."
+            )
+            weakly_connect = False
+        return strongly_connect, weakly_connect
 
     def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor):
         """Given a trajectory and the tangent vectors, compute the distance
@@ -1871,12 +1932,10 @@ class SolverGraphRanders(torch.nn.Module):
         return dst
 
 
-
-
 class GEORCE(GeodesicDistanceSolver):
-    """ 
+    """
     Computes the geodesic distances between points using the GEORCE algorithm.
-    
+
     Paper : GEORCE: A Fast New Control Algorithm for  Computing Geodesics
     Code is a translation of the original code from :
     https://github.com/FrederikMR/georce/blob/main/georce/
@@ -1895,10 +1954,11 @@ class GEORCE(GeodesicDistanceSolver):
     c : float
         The constant used in the line search.
     alpha_0 : float
-        The initial step size for the line search. 
+        The initial step size for the line search.
     rho : float
         The factor by which the step size is reduced in the line search.
     """
+
     def __init__(
         self, cometric, T=100, max_iter=100, tol=1e-4, rho=0.5, c=0.9, alpha_0: float = 1.0
     ):
@@ -2102,8 +2162,10 @@ class GEORCE(GeodesicDistanceSolver):
             t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
             x_t_0 = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, d)
         else:
-            assert x_t_0.shape == (self.T - 1, d), f"x_t_0 must have shape {(self.T - 1, d)=} got {x_t_0.shape=}. But sure to exclude x_0 and x_T."
-
+            assert x_t_0.shape == (
+                self.T - 1,
+                d,
+            ), f"x_t_0 must have shape {(self.T - 1, d)=} got {x_t_0.shape=}. But sure to exclude x_0 and x_T."
 
         G_inv_0 = self.cometric(x_0[None, :]).squeeze(0)
         G_0 = G_inv_0.inverse()
@@ -2184,7 +2246,7 @@ class GEORCE(GeodesicDistanceSolver):
         E_list = torch.tensor(E_list)
         return x_final, dst_list, norm_gE_list, E_list, alpha_list
 
-    def get_trajectories(self, x_0: Tensor, x_1: Tensor,x_t_0:Tensor=None) -> Tensor:
+    def get_trajectories(self, x_0: Tensor, x_1: Tensor, x_t_0: Tensor = None) -> Tensor:
         """Given the start and end points, compute the geodesic path between the two.
 
         Parameters:
@@ -2215,7 +2277,7 @@ class GEORCE(GeodesicDistanceSolver):
         trajectories = torch.stack(trajectories, dim=0)  # (B, T+1, d)
         return trajectories
 
-    def forward(self, x_0: Tensor, x_T: Tensor,x_t_0:Tensor=None) -> Tensor:
+    def forward(self, x_0: Tensor, x_T: Tensor, x_t_0: Tensor = None) -> Tensor:
         """
         Compute the geodesic distance between two points x_0 and x_T.
 
