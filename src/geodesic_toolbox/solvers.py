@@ -1956,6 +1956,8 @@ class GEORCE(GeodesicDistanceSolver):
         The initial step size for the line search.
     rho : float
         The factor by which the step size is reduced in the line search.
+    pbar : bool
+        If True, a progress bar is displayed during the optimization. Default is False.
     """
 
     def __init__(
@@ -1967,6 +1969,7 @@ class GEORCE(GeodesicDistanceSolver):
         rho=0.5,
         c=0.9,
         alpha_0: float = 1.0,
+        pbar: bool = False,
     ):
         super().__init__()
         self.cometric = cometric
@@ -1976,6 +1979,7 @@ class GEORCE(GeodesicDistanceSolver):
         self.rho = rho
         self.c = c
         self.alpha_0 = alpha_0
+        self.pbar = pbar
 
     def compute_energy(self, z_t, z0, zT):
         """
@@ -2192,7 +2196,8 @@ class GEORCE(GeodesicDistanceSolver):
         E_list = [self.compute_energy(x_t_i, x_0, x_T).item()]
         alpha_list = [1.0]
 
-        pbar = tqdm(range(self.max_iter), total=self.max_iter, desc="Iterations")
+        if self.pbar:
+            pbar = tqdm(range(self.max_iter), total=self.max_iter, desc="Iterations")
         # for i in pbar:
         while (norm_grad_E_t > self.tol) & (i < self.max_iter):
             # L5
@@ -2237,14 +2242,15 @@ class GEORCE(GeodesicDistanceSolver):
             E_list.append(E)
             alpha_list.append(alpha)
 
-            pbar.set_description(
-                f"{i=} |"
-                f" alpha: {alpha:.4f}, "
-                f"E = {E:.4f}, "
-                f"grad_E = {norm_grad_E_t.item():.4f}, "
-                f" dst = {dst:.4f}"
-            )
-            pbar.update(1)
+            if self.pbar:
+                pbar.set_description(
+                    f"{i=} |"
+                    f" alpha: {alpha:.4f}, "
+                    f"E = {E:.4f}, "
+                    f"grad_E = {norm_grad_E_t.item():.4f}, "
+                    f" dst = {dst:.4f}"
+                )
+                pbar.update(1)
 
         x_final = torch.cat([x_0[None, :], x_t_i, x_T[None, :]], dim=0)  # (T+1, d)
         dst_list = torch.tensor(dst_list)
@@ -2343,6 +2349,8 @@ class GEORCERanders(torch.nn.Module):
         The initial step size for the line search.
     rho : float
         The factor by which the step size is reduced in the line search.
+    pbar : bool
+        If True, a progress bar is displayed during the optimization. Default is False.
     """
 
     def __init__(
@@ -2354,6 +2362,7 @@ class GEORCERanders(torch.nn.Module):
         rho=0.5,
         c=0.9,
         alpha_0: float = 1.0,
+        pbar: bool = False,
     ):
         super().__init__()
         self.randers = randers
@@ -2363,6 +2372,7 @@ class GEORCERanders(torch.nn.Module):
         self.rho = rho
         self.c = c
         self.alpha_0 = alpha_0
+        self.pbar = pbar
 
     def compute_energy(self, z_t, z0, zT, dx=None):
         """
@@ -2651,7 +2661,8 @@ class GEORCERanders(torch.nn.Module):
         E_list = [self.compute_energy(x_t_i, x_0, x_T, dx=u_t_i).item()]
         alpha_list = [1.0]
 
-        pbar = tqdm(range(self.max_iter), total=self.max_iter, desc="Iterations")
+        if self.pbar:
+            pbar = tqdm(range(self.max_iter), total=self.max_iter, desc="Iterations")
         # for i in pbar:
         while (norm_grad_E_t > self.tol) & (i < self.max_iter):
             # L5
@@ -2695,14 +2706,15 @@ class GEORCERanders(torch.nn.Module):
             E_list.append(E)
             alpha_list.append(alpha)
 
-            pbar.set_description(
-                f"{i=} |"
-                f" alpha: {alpha:.4f}, "
-                f"E = {E:.4f}, "
-                f"grad_E = {norm_grad_E_t.item():.4f}, "
-                f" dst = {dst:.4f}"
-            )
-            pbar.update(1)
+            if self.pbar:
+                pbar.set_description(
+                    f"{i=} |"
+                    f" alpha: {alpha:.4f}, "
+                    f"E = {E:.4f}, "
+                    f"grad_E = {norm_grad_E_t.item():.4f}, "
+                    f" dst = {dst:.4f}"
+                )
+                pbar.update(1)
 
         if norm_grad_E_t.isnan():
             print("Warning: Gradient of the energy is NaN. Stopping optimization.")
@@ -2796,6 +2808,7 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
         rho=0.5,
         c=0.9,
         alpha_0: float = 1.0,
+        pbar_georce: bool = False,
     ):
         super().__init__(cometric=cometric)
         dt = 1.0 / T
@@ -2814,6 +2827,7 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
             rho=rho,
             c=c,
             alpha_0=alpha_0,
+            pbar=pbar_georce,
         )
 
     def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
@@ -2851,6 +2865,7 @@ class SolverGraphGEORCERanders(GEORCERanders):
         rho=0.5,
         c=0.9,
         alpha_0: float = 1.0,
+        pbar_georce: bool = False,
     ):
         super().__init__(
             randers=randers,
@@ -2860,6 +2875,7 @@ class SolverGraphGEORCERanders(GEORCERanders):
             rho=rho,
             c=c,
             alpha_0=alpha_0,
+            pbar=pbar_georce,
         )
         dt = 1.0 / T
         self.graph_solver = SolverGraphRanders(
