@@ -11,6 +11,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 from scipy.interpolate import CubicSpline
 from networkx import Graph, DiGraph, is_connected, is_strongly_connected, is_weakly_connected
+import networkx as nx
 
 from .cometric import CoMetric, IdentityCoMetric, RandersMetrics
 from .utils import (
@@ -974,7 +975,7 @@ class SolverGraph(GeodesicDistanceSolver):
         # Find the Euclidean kNN
         N_data = data.shape[0]
         _, indices = knn.kneighbors(data.cpu())
-        indices = indices[:, 1:]  # Remove the point itself
+        indices = indices[:, 1:]  # Remove the point itself, (N_data, k)
         Weight_matrix = np.zeros((N_data, N_data))
 
         num_batches = (N_data + b_size - 1) // b_size
@@ -985,37 +986,95 @@ class SolverGraph(GeodesicDistanceSolver):
                 start = batch_idx * b_size
                 end = min(start + b_size, N_data)
                 batch_idx = torch.arange(start, end)
-                curr_idx = indices[batch_idx]
+                curr_idx = indices[batch_idx]  # (b_size, k)
 
                 p_i = data[batch_idx][:, None, None, :]
                 p_j = data[curr_idx][:, :, None, :]
 
-                linear_traj = p_i + t * (p_j - p_i)
+                linear_traj = p_i + t * (p_j - p_i)  # (b_size, k, T, d)
                 linear_traj = rearrange(linear_traj, "b k T d -> (b k) T d")
                 curve_length = self.compute_distance(linear_traj)
                 curve_length = rearrange(curve_length, "(b k) -> b k", b=batch_idx.shape[0])
                 Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length.cpu()
+                Weight_matrix[curr_idx, batch_idx.view(-1, 1)] = curve_length.cpu()
 
+        # Make the weight matrix symmetric
         W = 0.5 * (Weight_matrix + Weight_matrix.T)
 
-        self.check_graph_validity(W)
-
-        return W, knn
-
-    def check_graph_validity(self, W: np.ndarray):
-        """Check if the graph is valid, i.e. if it is symmetric and has no negative weights."""
+        # Check_graph_validity
         if not np.allclose(W, W.T):
             raise ValueError("The weight matrix is not symmetric.")
         if np.any(W < 0):
             raise ValueError("The weight matrix has negative weights.")
         G = Graph(W)
-        if not is_connected(G):
-            print(
-                "The graph is not connected. "
-                "Either the data is not connected. Then this solver will fail to find "
-                "trajectories between points from different connected components. "
-                "Or the number of neighbors is too small. Try increasing n_neighbors."
-            )
+        self.weakly_connected = is_connected(G)
+        if not self.weakly_connected:
+            W = self.connect_graph(W)
+        return W, knn
+
+    def get_cc_connections_idx(self, W, X):
+        """
+        Given the adjacency matrix W and the data points X,
+        returns the indices of the connections between the connected components.
+
+        Parameters:
+        W (torch.Tensor): Adjacency matrix of shape (n, n).
+        X (torch.Tensor): Data points of shape (n, d).
+
+        Returns:
+        idx_correspondence (torch.Tensor) of shape (m, 2):
+        Indices of the connections between connected components.
+            where idx_correspondence[i, 0] is the index of the first point connecting the i-th component
+            and idx_correspondence[i, 1] is the index of the second point connecting the i-th component to its
+            closest component.
+        """
+        # Get connected components from the adjacency matrix W
+        G = Graph(W)
+        cc_list = []
+        for c in nx.connected_components(G):
+            cc_list.append(torch.tensor(list(c)))
+
+        # minus one because the last cluster
+        # will have been compared to all previous ones
+        idx_correspondence = torch.zeros(len(cc_list) - 1, 2, dtype=torch.long)
+
+        for i in range(len(cc_list) - 1):
+            bst_dst_i = float("inf")
+            idx_i, idx_j = None, None
+            X_cc_i = X[cc_list[i]]
+            for j in range(i + 1, len(cc_list)):
+                X_cc_j = X[cc_list[j]]
+
+                dst_ij = torch.cdist(X_cc_i, X_cc_j, p=2)
+                bst_dst = torch.min(dst_ij)
+                if bst_dst < bst_dst_i:
+                    bst_dst_i = bst_dst
+                    bst_pts = torch.argmin(dst_ij)
+                    idx_i, idx_j = torch.unravel_index(bst_pts, dst_ij.shape)
+                    # Map idx_i and idx_j to the original indices
+                    idx_i = cc_list[i][idx_i]
+                    idx_j = cc_list[j][idx_j]
+            idx_correspondence[i, 0] = idx_i
+            idx_correspondence[i, 1] = idx_j
+        return idx_correspondence
+
+    def connect_graph(self, W) -> torch.Tensor:
+        """
+        Connect the connected components of the graph by adding dummy edges.
+        This is a workaround to ensure that the graph is connected.
+        The cc are connected via their closest points according to euclidean distance.
+        """
+        idx_correspondence = self.get_cc_connections_idx(W, self.data)
+        a = self.data[idx_correspondence]
+        t = torch.arange(0, 1, self.dt, device=self.data.device).view(1, -1, 1)
+
+        p_i = a[:, 0][:, None, :]
+        p_j = a[:, 1][:, None, :]
+        linear_traj = p_i + t * (p_j - p_i)  # (n_cc,T,d)
+        dst = self.compute_distance(linear_traj)
+        W[idx_correspondence[:, 0], idx_correspondence[:, 1]] = dst
+        W[idx_correspondence[:, 1], idx_correspondence[:, 0]] = dst
+        return W
 
     def get_similarity_matrix(self, W, sigma=1):
         """Compute the similarity matrix using the weight matrix W
@@ -1465,6 +1524,8 @@ def dst_mat_vectorized(
     return distances
 
 
+# @TODO : If not weakly connected, connect connected components with a dummy edge
+# @TODO : If not strongly connected, connect the components with a dummy edge
 class SolverGraphRanders(torch.nn.Module):
     """Computes the geodesic distances between points using a KNN-graph
     for metrics from a Randers space.
@@ -1599,6 +1660,10 @@ class SolverGraphRanders(torch.nn.Module):
                 "Or the number of neighbors is too small. Try increasing n_neighbors."
             )
             weakly_connect = False
+
+        self.stronly_connect = strongly_connect
+        self.weakly_connect = weakly_connect
+
         return strongly_connect, weakly_connect
 
     def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor):
@@ -2841,10 +2906,16 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
         traj_q : Tensor (b,n_pts,dim), points on the trajectory
         """
         pts_on_traj_graph = self.graph_solver.get_trajectories(q0, q1, connect_euclidean=True)
-        pts_on_traj_georce = self.georce_solver.get_trajectories(
-            q0, q1, pts_on_traj_graph[:, 1:-2, :].clone().detach()
-        )
-        return pts_on_traj_georce
+        if self.graph_solver.weakly_connected:
+            # If the graph is weakly connected, we can use the points on the trajectory
+            # computed by the graph solver as initial guess for the GEORCE solver.
+            # Because we know GEORCE will refine the trajectory and won't diverge.
+            pts_on_traj_georce = self.georce_solver.get_trajectories(
+                q0, q1, pts_on_traj_graph[:, 1:-2, :].clone().detach()
+            )
+            return pts_on_traj_georce
+        else:
+            return pts_on_traj_graph
 
 
 class SolverGraphGEORCERanders(GEORCERanders):
@@ -2897,7 +2968,13 @@ class SolverGraphGEORCERanders(GEORCERanders):
         traj_q : Tensor (b,n_pts,dim), points on the trajectory
         """
         pts_on_traj_graph = self.graph_solver.get_trajectories(q0, q1, connect_euclidean=True)
-        pts_on_traj_georce = super().get_trajectories(
-            q0, q1, pts_on_traj_graph[:, 1:-2, :].detach()
-        )
-        return pts_on_traj_georce
+        if self.graph_solver.weakly_connected:
+            # If the graph is weakly connected, we can use the points on the trajectory
+            # computed by the graph solver as initial guess for the GEORCE solver.
+            # Because we know GEORCE will refine the trajectory and won't diverge.
+            pts_on_traj_georce = super().get_trajectories(
+                q0, q1, pts_on_traj_graph[:, 1:-2, :].detach()
+            )
+            return pts_on_traj_georce
+        else:
+            return pts_on_traj_graph
