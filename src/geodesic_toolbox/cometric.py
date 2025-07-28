@@ -4,6 +4,9 @@ import torch.nn as nn
 from sklearn.cluster import KMeans
 import numpy as np
 from tqdm import tqdm
+import kmedoids
+
+from sklearn.metrics.pairwise import euclidean_distances
 
 ################################################################
 # Utils
@@ -999,6 +1002,9 @@ class CentroidsCometric(CoMetric):
         The temperature of the gaussian kernel. It controls the smoothness of the interpolation.
     reg_coef : float
         Regularization coefficient for the cometric
+    K: int, Default None
+        If not None, the number of centroids to use, computed by KMedoids clustering.
+        Auto set the temperature to the maximum minimum distance between centroids.
     """
 
     def __init__(
@@ -1007,6 +1013,7 @@ class CentroidsCometric(CoMetric):
         cometric_centroids: Tensor = None,
         temperature: float = 1.0,
         reg_coef: float = 1e-3,
+        K: int = None,
     ):
         super().__init__()
         # @TODO: check if cometric_centroids is a valid cometric tensor
@@ -1016,6 +1023,33 @@ class CentroidsCometric(CoMetric):
             self.register_buffer("cometric_centroids", cometric_centroids)
         self.register_buffer("temperature", torch.tensor(temperature))
         self.register_buffer("reg_coef", torch.tensor(reg_coef))
+
+        if K is not None and self.centroids is not None:
+            self.process_centroids(K)
+        if K is None and self.centroids is not None:
+            self.K = self.centroids.size(0)
+        else:
+            self.K = K
+
+    def process_centroids(self, K: int):
+        if K < self.centroids.shape[0]:
+            dst_mat = euclidean_distances(self.centroids.numpy())
+            kmedoids_model = kmedoids.KMedoids(
+                n_clusters=K, metric="precomputed", random_state=1312
+            )
+            kmedoids_model.fit(dst_mat)
+            centroids_idx = kmedoids_model.medoid_indices_
+
+            self.centroids = self.centroids[centroids_idx]
+            self.cometric_centroids = self.cometric_centroids[centroids_idx]
+        else:
+            print(
+                f"Warning: K={K} is greater than the number of centroids {self.centroids.shape[0]}. Using all centroids."
+            )
+        dst_mat = torch.cdist(self.centroids, self.centroids, p=2)
+        dst_mat[dst_mat == 0] = float("inf")  # Avoid zero self distances
+        min_distances, _ = dst_mat.min(dim=1)
+        self.temperature = min_distances.max()
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         # Just to accomodate loading a state_dict with centroids and cometric_centroids
@@ -1397,7 +1431,7 @@ class RandersMetrics(nn.Module):
 
         G = torch.vmap(g)
         return G(x, v)
-    
+
     def fund_tensor_analytic_(self, x: Tensor, v: Tensor):
         alpha = self.base_cometric(x).inverse()
         beta = self.beta * self.omega(v)
@@ -1420,7 +1454,6 @@ class RandersMetrics(nn.Module):
         g = lhs_term + rhs_term
 
         return g
-
 
     def fundamental_tensor(self, x: Tensor, v: Tensor):
         """
