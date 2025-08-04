@@ -13,7 +13,7 @@ from scipy.interpolate import CubicSpline
 from networkx import Graph, DiGraph, is_connected, is_strongly_connected, is_weakly_connected
 import networkx as nx
 
-from .cometric import CoMetric, IdentityCoMetric, RandersMetrics
+from .cometric import CoMetric, IdentityCoMetric, FinslerMetric
 from .utils import (
     magnification_factor,
     hamiltonian,
@@ -1527,13 +1527,13 @@ def dst_mat_vectorized(
     return distances
 
 
-class SolverGraphRanders(torch.nn.Module):
+class SolverGraphFinsler(torch.nn.Module):
     """Computes the geodesic distances between points using a KNN-graph
-    for metrics from a Randers space.
+    for metrics from a Finsler space.
 
     Parameters
     ----------
-    randers_metric : nn.Module
+    finsler_metric : FinslerMetrics
         The metric to use to compute the geodesic distances
     data : torch.Tensor (N,D)
         The data points used to compute the graph
@@ -1547,14 +1547,14 @@ class SolverGraphRanders(torch.nn.Module):
 
     def __init__(
         self,
-        randers_metric: RandersMetrics,
+        finsler_metric: FinslerMetric,
         data: torch.Tensor,
         n_neighbors: int,
         dt: float = 0.01,
         batch_size: int = 64,
     ) -> None:
-        super(SolverGraphRanders, self).__init__()
-        self.randers_metric = randers_metric
+        super().__init__()
+        self.finsler_metric = finsler_metric
         self.data = data
         self.n_neighbors = n_neighbors
         self.dt = dt
@@ -1696,7 +1696,7 @@ class SolverGraphRanders(torch.nn.Module):
 
     def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor=None):
         """Given a trajectory and the tangent vectors, compute the distance
-        under the Randers metric.
+        under the finsler metric.
 
         Parameters
         ----------
@@ -1716,7 +1716,7 @@ class SolverGraphRanders(torch.nn.Module):
             tangent_vectors[:, :-1, :] = traj[:, 1:, :] - traj[:, :-1, :]
             tangent_vectors[:, -1, :] = traj[:, -1, :] - traj[:, -2, :]
         distances = torch.stack(
-            [self.randers_metric(m, seg) for m, seg in zip(traj, tangent_vectors)]
+            [self.finsler_metric(m, seg) for m, seg in zip(traj, tangent_vectors)]
         )  # (B, T)
         distances = distances.relu().sum(dim=1)  # (B,)
         return distances
@@ -2423,10 +2423,10 @@ class GEORCE(GeodesicDistanceSolver):
         return dst
 
 
-class GEORCERanders(torch.nn.Module):
+class GEORCEFinsler(torch.nn.Module):
     """
     Computes the geodesic distances between points using the GEORCE algorithm
-    on a Randers metric.
+    on a Finsler metric.
 
     Paper : GEORCE: A Fast New Control Algorithm for  Computing Geodesics
     Code is a translation of the original code from :
@@ -2434,8 +2434,8 @@ class GEORCERanders(torch.nn.Module):
 
     Parameters:
     ----------
-    randers : RandersMetrics
-        The Randers metric to use for the geodesic distances.
+    finsler : FinslerMetric
+        The Finsler metric to use for the geodesic distances.
     T : int
         The number of time steps to use for the geodesic trajectory.
     max_iter : int
@@ -2455,7 +2455,7 @@ class GEORCERanders(torch.nn.Module):
 
     def __init__(
         self,
-        randers: RandersMetrics,
+        finsler: FinslerMetric,
         T=100,
         max_iter=200,
         tol=1e-6,
@@ -2465,7 +2465,7 @@ class GEORCERanders(torch.nn.Module):
         pbar: bool = False,
     ):
         super().__init__()
-        self.randers = randers
+        self.finsler = finsler
         self.T = T
         self.max_iter = max_iter
         self.tol = tol
@@ -2497,7 +2497,7 @@ class GEORCERanders(torch.nn.Module):
         traj = torch.cat([z0[None, :], z_t, zT[None, :]], dim=0)  # (T+1, d)
         if dx is None:
             dx = traj[1:] - traj[:-1]  # (T, d)
-        G = self.randers.fundamental_tensor(traj[:-1], dx)  # (T, d, d)
+        G = self.finsler.fundamental_tensor(traj[:-1], dx)  # (T, d, d)
         energy = torch.einsum("ti,tij,tj->t", dx, G, dx)  # (T,)
         return energy.sum()
 
@@ -2517,7 +2517,7 @@ class GEORCERanders(torch.nn.Module):
         dot: Tensor
             The sum of the dot product of the velocity with the fundamental tensor.
         """
-        G_t = self.randers.fundamental_tensor(x_t, u_t)
+        G_t = self.finsler.fundamental_tensor(x_t, u_t)
         dot = torch.einsum("ti,tij,tj->t", u_t, G_t, u_t)
         return dot.sum()
 
@@ -2541,7 +2541,7 @@ class GEORCERanders(torch.nn.Module):
         dot: Tensor
             The sum of the dot product of the velocity with the fundamental tensor.
         """
-        G_t = self.randers.fundamental_tensor(x_t, u_t_0)
+        G_t = self.finsler.fundamental_tensor(x_t, u_t_0)
         dot = torch.einsum("ti,tij,tj->t", u_t_1, G_t, u_t_1)
         return dot.sum()
 
@@ -2688,7 +2688,7 @@ class GEORCERanders(torch.nn.Module):
         """
         full_traj = torch.cat([x_0[None, :], x_t, x_T[None, :]], dim=0)  # (T+1, d)
         dx = full_traj[1:] - full_traj[:-1]  # (T, d)
-        G = self.randers.fundamental_tensor(full_traj[:-1], dx)  # (T, d, d)
+        G = self.finsler.fundamental_tensor(full_traj[:-1], dx)  # (T, d, d)
         distance = torch.einsum("ti,tij,tj->t", dx, G, dx).abs().sqrt()  # (T,)
         return distance.sum()
 
@@ -2744,7 +2744,7 @@ class GEORCERanders(torch.nn.Module):
         # (T, d) Initial guess of the velocity, not including x_T
         u_t_i = diff * torch.ones(self.T, d, device=x_0.device) / self.T
 
-        G_0 = self.randers.fundamental_tensor(x_0[None, :], u_t_i[0, :].unsqueeze(0)).squeeze(
+        G_0 = self.finsler.fundamental_tensor(x_0[None, :], u_t_i[0, :].unsqueeze(0)).squeeze(
             0
         )
 
@@ -2767,7 +2767,7 @@ class GEORCERanders(torch.nn.Module):
         # for i in pbar:
         while (norm_grad_E_t > self.tol) & (i < self.max_iter):
             # L5
-            G_t = self.randers.fundamental_tensor(x_t_i, u_t_i[1:])  # (T-1, d, d)
+            G_t = self.finsler.fundamental_tensor(x_t_i, u_t_i[1:])  # (T-1, d, d)
             G_t = torch.cat([G_0[None, :], G_t], dim=0)  # (T, d, d)
             G_inv_t = G_t.inverse()  # (T, d, d)
 
@@ -2963,7 +2963,7 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
 
 
 
-class SolverGraphGEORCERanders(GEORCERanders):
+class SolverGraphGEORCEFinsler(GEORCEFinsler):
     """
     Chained solver. First the initial trajectory are computed using
     a graph based approach. Then they are refined using the GEORCE solver.
@@ -2971,7 +2971,7 @@ class SolverGraphGEORCERanders(GEORCERanders):
 
     def __init__(
         self,
-        randers: RandersMetrics,
+        finsler: FinslerMetric,
         data: torch.Tensor,
         n_neighbors: int,
         batch_size: int = 64,
@@ -2984,7 +2984,7 @@ class SolverGraphGEORCERanders(GEORCERanders):
         pbar_georce: bool = False,
     ):
         super().__init__(
-            randers=randers,
+            finsler=finsler,
             T=T,
             max_iter=max_iter,
             tol=tol,
@@ -2994,8 +2994,8 @@ class SolverGraphGEORCERanders(GEORCERanders):
             pbar=pbar_georce,
         )
         dt = 1.0 / T
-        self.graph_solver = SolverGraphRanders(
-            randers_metric=randers,
+        self.graph_solver = SolverGraphFinsler(
+            finsler_metric=finsler,
             data=data,
             n_neighbors=n_neighbors,
             dt=dt,

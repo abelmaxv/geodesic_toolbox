@@ -1366,7 +1366,107 @@ class ToyFinslerMetric(nn.Module):
         return G(x, v)
 
 
-class RandersMetrics(nn.Module):
+class FinslerMetric(nn.Module):
+    """
+    Finsler metric base class
+    """
+
+    def __init__(self):
+        super(FinslerMetric, self).__init__()
+
+    def forward(self, x: Tensor, v: Tensor):
+        """
+        Compute the Finsler metric at point x in the direction v.
+        """
+        raise NotImplementedError("FinslerMetric is an abstract class")
+
+    def fundamental_tensor(self, x: Tensor, v: Tensor):
+        """
+        Compute the fundamental tensor of the Finsler metric at point x in the direction v.
+        """
+
+        def g(x1, v2):
+            F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
+            g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
+            return g_hessian(v2)
+
+        G = torch.vmap(g)
+        return G(x, v)
+
+
+class MatsumotoMetrics(FinslerMetric):
+    """
+    Matsumoto metrics with a fixed base metric and a variable 1-form.
+
+    The 1-form must verify the condition that the resulting Matsumoto metric is positive.
+    It is up to the user to ensure this condition is satisfied.
+
+    Parameters
+    ----------
+    alpha_inv : CoMetric
+        Base cometric to use for the Matsumoto metric.
+    beta : nn.Module
+        1-form to use for the Matsumoto metric. It should be a function that takes
+        in points on the manifold and outputs a vector of the same size as the points.
+    """
+
+    def __init__(self, alpha_inv: CoMetric, beta: nn.Module):
+        super(self).__init__()
+        self.alpha_inv = alpha_inv
+        self.beta = beta
+
+    def forward(self, x: Tensor, v: Tensor):
+        """Compute F(x,v) = alpha**2 / (alpha - beta)"""
+        alpha = self.alpha_inv(x).inverse()
+        alpha = torch.einsum("bi,bij,bj->b", v, alpha, v).sqrt()  # norm of v w.r.t. alpha
+        beta = self.beta(x)
+        return alpha**2 / (alpha - beta)  # Matsumoto metric formula
+
+
+class SlopeMetrics(FinslerMetric):
+    """
+    Slope metrics are Matsumoto metrics derived from
+    a height map.
+
+    Parameters
+    ----------
+    f : func (N,2)-> (N,)
+        Function that takes in points on the manifold and outputs a scalar value.
+        This function represents the height map. To define a valid metric,
+        The partial derivatives of f are required to verify f_x^2 + f_y^2 < 1/3 everywhere.
+    """
+
+    def __init__(self, f: nn.Module):
+        super(SlopeMetrics, self).__init__()
+        self.f = f
+        self.f_no_batch = lambda x: self.f(x.unsqueeze(0)).squeeze(0)
+        self.df_ = torch.vmap(torch.func.jacrev(self.f_no_batch))
+
+    def forward(self, x: Tensor, v: Tensor):
+        """Computes F(x,v)= alpha**2 / (alpha - beta)
+        where alpha and beta are given in "The geometry on the slope of a mountain"
+        see : http://arxiv.org/abs/1811.02123
+        Parameters
+        ----------
+        x : torch.Tensor (b,2)
+            Points in the manifold. Must have x.requires_grad=True
+        v : torch.Tensor (b,2)
+            Tangent vectors at x
+        """
+        df = self.df_(x)
+        df_dx, df_dy = df[:, 0], df[:, 1]
+
+        alpha = (
+            (1 + df_dx**2) * v[:, 0] ** 2
+            + (1 + df_dy**2) * v[:, 1] ** 2
+            + 2 * df_dx * df_dy * v[:, 0] * v[:, 1]
+        ).sqrt()
+        beta = df_dx * v[:, 0] + df_dy * v[:, 1]
+        F = alpha**2 / (alpha - beta)
+        return F
+
+
+class RandersMetrics(FinslerMetric):
     """Randers metrics with a fixed base metric and a variable 1-form.
 
     The 1-form must verify the condition that the resulting Randers metric is positive.
@@ -1423,15 +1523,6 @@ class RandersMetrics(nn.Module):
         F = x_norm + self.beta * omega_x_v
         return F
 
-    def fund_tensor_grad_(self, x: Tensor, v: Tensor):
-        def g(x1, v2):
-            F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
-            g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
-            return g_hessian(v2)
-
-        G = torch.vmap(g)
-        return G(x, v)
-
     def fund_tensor_analytic_(self, x: Tensor, v: Tensor):
         alpha = self.base_cometric(x).inverse()
         beta = self.beta * self.omega(v)
@@ -1476,6 +1567,6 @@ class RandersMetrics(nn.Module):
             Fundamental tensor of the Randers metric at x in the direction of v
         """
         if self.use_grad_g:
-            return self.fund_tensor_grad_(x, v)
+            return super().fundamental_tensor(x, v)
         else:
             return self.fund_tensor_analytic_(x, v)
