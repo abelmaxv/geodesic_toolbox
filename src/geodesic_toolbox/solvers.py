@@ -3021,13 +3021,13 @@ class SolverGraphGEORCEFinsler(GEORCEFinsler):
         # This prevent the case where GEORCE didn't converge
         B = q0.shape[0]
         for b in range(B):
-            traj_graph = pts_on_traj_graph[b, 1:-2, :]
+            traj_graph = pts_on_traj_graph[b, :-1, :]
             traj_georce = pts_on_traj_georce[b]
-            dst_graph_ = self.dst_func(q0[b], q1[b], traj_graph)
+            dst_graph_ = self.dst_func(q0[b], q1[b], traj_graph[1:-1])
             dst_georce_ = self.dst_func(q0[b], q1[b], traj_georce[1:-1])
             if dst_graph_ < dst_georce_:
-                final_traj[b] = pts_on_traj_graph[b, :-1]
+                final_traj[b] = traj_graph.detach().clone()
             else:
-                final_traj[b] = pts_on_traj_georce[b]
-        return pts_on_traj_georce
+                final_traj[b] = pts_on_traj_georce[b].detach().clone()
+        return final_traj
 
