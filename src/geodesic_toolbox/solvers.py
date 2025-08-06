@@ -1694,7 +1694,7 @@ class SolverGraphFinsler(torch.nn.Module):
         W[idx_correspondence[:, 1], idx_correspondence[:, 0]] = dst_backward
         return W
 
-    def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor=None):
+    def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor = None):
         """Given a trajectory and the tangent vectors, compute the distance
         under the finsler metric.
 
@@ -2288,7 +2288,9 @@ class GEORCE(GeodesicDistanceSolver):
         # L4
         grad_E_t = self.grad_E(x_t_i, x_0, x_T)
         norm_grad_E_t = torch.linalg.vector_norm(grad_E_t.reshape(-1))
-        norm_grad_E_t = norm_grad_E_t / (grad_E_t.shape[0]*grad_E_t.shape[1] ) # Normalize by the dimension
+        norm_grad_E_t = norm_grad_E_t / (
+            grad_E_t.shape[0] * grad_E_t.shape[1]
+        )  # Normalize by the dimension
 
         dst_list = [self.dst_func(x_0, x_T, x_t_i).item()]
         norm_gE_list = [norm_grad_E_t.item()]
@@ -2331,7 +2333,9 @@ class GEORCE(GeodesicDistanceSolver):
             # Prepare stop condition, ie L4
             grad_E_t = self.grad_E(x_t_i, x_0, x_T)
             norm_grad_E_t = torch.linalg.vector_norm(grad_E_t.reshape(-1))
-            norm_grad_E_t = norm_grad_E_t / (grad_E_t.shape[0] * grad_E_t.shape[1])  # Normalize by the dimension
+            norm_grad_E_t = norm_grad_E_t / (
+                grad_E_t.shape[0] * grad_E_t.shape[1]
+            )  # Normalize by the dimension
             i += 1
 
             # Logging
@@ -2755,7 +2759,9 @@ class GEORCEFinsler(torch.nn.Module):
             0
         ]  # (T-1, d)
         norm_grad_E_t = torch.linalg.vector_norm(grad_E_t.reshape(-1))
-        norm_grad_E_t = norm_grad_E_t / (grad_E_t.shape[0] * grad_E_t.shape[1])  # Normalize by the dimension
+        norm_grad_E_t = norm_grad_E_t / (
+            grad_E_t.shape[0] * grad_E_t.shape[1]
+        )  # Normalize by the dimension
 
         dst_list = [self.dst_func(x_0, x_T, x_t_i).item()]
         norm_gE_list = [norm_grad_E_t.item()]
@@ -2810,16 +2816,18 @@ class GEORCEFinsler(torch.nn.Module):
 
             if self.pbar:
                 pbar.set_description(
-                    f"{i=} |"
-                    f" alpha: {alpha:.4f}, "
-                    f"E = {E:.4f}, "
-                    f"grad_E = {norm_grad_E_t.item():.4f}, "
-                    f" dst = {dst:.4f}"
+                    f"{i=:0>3} |"
+                    f" alpha: {alpha:.3E}, "
+                    f"E = {E:.3E}, "
+                    f"grad_E = {norm_grad_E_t.item():.3E}, "
+                    f" dst = {dst:.3E}"
                 )
                 pbar.update(1)
 
         if norm_grad_E_t.isnan():
-            print("Warning: Gradient of the energy is NaN. Stopping optimization. Return straight line.")
+            print(
+                "Warning: Gradient of the energy is NaN. Stopping optimization. Return straight line."
+            )
             t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
             x_t_i = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, d)
 
@@ -2962,7 +2970,6 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
         return final_traj
 
 
-
 class SolverGraphGEORCEFinsler(GEORCEFinsler):
     """
     Chained solver. First the initial trajectory are computed using
@@ -3030,4 +3037,3 @@ class SolverGraphGEORCEFinsler(GEORCEFinsler):
             else:
                 final_traj[b] = pts_on_traj_georce[b].detach().clone()
         return final_traj
-
