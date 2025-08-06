@@ -309,8 +309,8 @@ def get_mf_image(
     if embeddings is not None:
         device = embeddings.device
 
-    x_plot = torch.linspace(min_x, max_x, resolution)
-    y_plot = torch.linspace(min_y, max_y, resolution)
+    x_plot = torch.linspace(min_x, max_x, resolution, device=device)
+    y_plot = torch.linspace(min_y, max_y, resolution, device=device)
     xx, yy = torch.meshgrid(x_plot, y_plot, indexing="ij")
     Q = torch.stack([xx, yy], dim=-1)
     W, H, _ = Q.shape
