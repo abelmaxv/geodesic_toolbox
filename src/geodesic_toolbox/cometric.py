@@ -6,8 +6,6 @@ import numpy as np
 from tqdm import tqdm
 import kmedoids
 
-from sklearn.metrics.pairwise import euclidean_distances
-
 ################################################################
 # Utils
 ################################################################
@@ -1005,6 +1003,8 @@ class CentroidsCometric(CoMetric):
     K: int, Default None
         If not None, the number of centroids to use, computed by KMedoids clustering.
         Auto set the temperature to the maximum minimum distance between centroids.
+    metric_weight: bool
+        If True, the interpolation weights is given by N(c_k,Sigma_k) else it is N(c_k,Id).
     """
 
     def __init__(
@@ -1014,6 +1014,7 @@ class CentroidsCometric(CoMetric):
         temperature: float = 1.0,
         reg_coef: float = 1e-3,
         K: int = None,
+        metric_weight: bool = True,
     ):
         super().__init__()
         # @TODO: check if cometric_centroids is a valid cometric tensor
@@ -1031,9 +1032,11 @@ class CentroidsCometric(CoMetric):
         else:
             self.K = K
 
+        self.metric_weight = metric_weight
+
     def process_centroids(self, K: int):
         if K < self.centroids.shape[0]:
-            dst_mat = euclidean_distances(self.centroids.numpy())
+            dst_mat = torch.cdist(self.centroids, self.centroids, p=2).sqrt().cpu().numpy()
             kmedoids_model = kmedoids.KMedoids(
                 n_clusters=K, metric="precomputed", random_state=1312
             )
@@ -1061,12 +1064,15 @@ class CentroidsCometric(CoMetric):
         return super().load_state_dict(state_dict, strict, assign)
 
     def forward(self, z: Tensor) -> Tensor:
-        dz = self.centroids.unsqueeze(0) - z.unsqueeze(1)
-        dz = torch.norm(dz, dim=-1)  # (m,b)
+        dz = self.centroids.unsqueeze(0) - z.unsqueeze(1)  # (b,K,d)
+        if self.metric_weight:
+            dz = torch.einsum("bki,kij,bkj->bk", dz, self.cometric_centroids, dz)  # (b,K)
+        else:
+            dz = torch.norm(dz, dim=-1)  # (m,b)
         weights = (
             torch.exp(-(dz**2) / (2 * self.temperature**2)).unsqueeze(-1).unsqueeze(-1)
         )  # (m,b,1,1)
-        G_inv = self.cometric_centroids.unsqueeze(0) * weights  # (m,b,d,d)
+        G_inv = self.cometric_centroids.unsqueeze(0) * weights  # (m,k,d,d)
         G_inv = G_inv.sum(dim=1)  # (m,d,d)
         G_inv = G_inv + self.reg_coef * self.eye(z)  # (m,d,d)
         return G_inv
