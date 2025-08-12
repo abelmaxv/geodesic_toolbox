@@ -2348,11 +2348,11 @@ class GEORCE(GeodesicDistanceSolver):
 
             if self.pbar:
                 pbar.set_description(
-                    f"{i=} |"
-                    f" alpha: {alpha:.4f}, "
-                    f"E = {E:.4f}, "
-                    f"grad_E = {norm_grad_E_t.item():.4f}, "
-                    f" dst = {dst:.4f}"
+                    f"{i=:0>3} |"
+                    f" alpha: {alpha:.3E}, "
+                    f"E = {E:.3E}, "
+                    f"grad_E = {norm_grad_E_t.item():.3E}, "
+                    f" dst = {dst:.3E}"
                 )
                 pbar.update(1)
 
