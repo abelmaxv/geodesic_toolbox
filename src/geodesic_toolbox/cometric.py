@@ -1002,6 +1002,7 @@ class CentroidsCometric(CoMetric):
         Regularization coefficient for the cometric
     K: int, Default None
         If not None, the number of centroids to use, computed by KMedoids clustering.
+        If K=-1, use all centroids and compute the temperature automatically.
         Auto set the temperature to the maximum minimum distance between centroids.
     metric_weight: bool
         If True, the interpolation weights is given by N(c_k,Sigma_k) else it is N(c_k,Id).
@@ -1035,7 +1036,7 @@ class CentroidsCometric(CoMetric):
         self.metric_weight = metric_weight
 
     def process_centroids(self, K: int):
-        if K < self.centroids.shape[0]:
+        if K < self.centroids.shape[0] and K > 0:
             dst_mat = torch.cdist(self.centroids, self.centroids, p=2).sqrt().cpu().numpy()
             kmedoids_model = kmedoids.KMedoids(
                 n_clusters=K, metric="precomputed", random_state=1312
@@ -1045,6 +1046,8 @@ class CentroidsCometric(CoMetric):
 
             self.centroids = self.centroids[centroids_idx]
             self.cometric_centroids = self.cometric_centroids[centroids_idx]
+        elif K == -1:
+            self.K = self.centroids.shape[0]
         else:
             print(
                 f"Warning: K={K} is greater than the number of centroids {self.centroids.shape[0]}. Using all centroids."
