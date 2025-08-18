@@ -183,7 +183,7 @@ class CoMetric(torch.nn.Module):
         # return torch.linalg.solve_ex(self.forward(q), p)
         return torch.linalg.solve(self.forward(q), p)
 
-    def angle(self,q:Tensor,u:Tensor,v:Tensor)-> Tensor:
+    def angle(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
         """
         Computes the angle between two vectors u and v at a point q.
 
@@ -1040,7 +1040,13 @@ class CentroidsCometric(CoMetric):
         metric_weight: bool = True,
     ):
         super().__init__()
-        # @TODO: check if cometric_centroids is a valid cometric tensor
+        assert (centroids is not None and cometric_centroids is not None) or (
+            centroids is None and cometric_centroids is None
+        ), "Either both centroids and cometric_centroids should be provided or none."
+        assert cometric_centroids is None or self.assess_cometric_tensor(
+            cometric_centroids
+        ), "Cometric centroids should be symetric positive semi-definite matrices."
+
         if centroids is not None:
             self.register_buffer("centroids", centroids)
         if cometric_centroids is not None:
@@ -1048,14 +1054,28 @@ class CentroidsCometric(CoMetric):
         self.register_buffer("temperature", torch.tensor(temperature))
         self.register_buffer("reg_coef", torch.tensor(reg_coef))
 
-        if K is not None and self.centroids is not None:
+        if K is not None and centroids is not None:
             self.process_centroids(K)
-        if K is None and self.centroids is not None:
+        elif K is None and centroids is not None:
             self.K = self.centroids.size(0)
         else:
             self.K = K
 
         self.metric_weight = metric_weight
+
+    def assess_cometric_tensor(self, cometric_centroids: Tensor) -> bool:
+        """Check if the cometric tensor is symmetric positive semi-definite."""
+        if cometric_centroids.ndim != 3 or cometric_centroids.size(
+            1
+        ) != cometric_centroids.size(2):
+            return False
+        if not torch.allclose(cometric_centroids, cometric_centroids.mT):
+            return False
+        try:
+            torch.linalg.cholesky(cometric_centroids)
+            return True
+        except RuntimeError:
+            return False
 
     def process_centroids(self, K: int):
         if K < self.centroids.shape[0] and K > 0:
