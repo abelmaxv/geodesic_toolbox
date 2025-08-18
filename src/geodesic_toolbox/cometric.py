@@ -183,6 +183,28 @@ class CoMetric(torch.nn.Module):
         # return torch.linalg.solve_ex(self.forward(q), p)
         return torch.linalg.solve(self.forward(q), p)
 
+    def angle(self,q:Tensor,u:Tensor,v:Tensor)-> Tensor:
+        """
+        Computes the angle between two vectors u and v at a point q.
+
+        Params:
+        q : Tensor (b,d) batch of points
+        u : Tensor (b,d) first tangent vector
+        v : Tensor (b,d) second tangent vector
+
+        Output:
+        angle : Tensor (b,) angle between u and v at q
+        """
+        eps = 1e-8  # small value to avoid division by zero
+        g = self.metric_tensor(q)
+        u_norm = torch.einsum("bi,bij,bj->b", u, g, u).sqrt()
+        v_norm = torch.einsum("bi,bij,bj->b", v, g, v).sqrt()
+        uv = torch.einsum("bi,bij,bj->b", u, g, v)
+        cos_angle = uv / (u_norm * v_norm + eps)
+        cos_angle = torch.clamp(cos_angle, -1.0, 1.0)  # clamp to avoid NaN
+        angle = torch.acos(cos_angle)
+        return angle
+
     def __add__(self, other):
         if isinstance(other, CoMetric):
             return SumOfCometric(self, other)

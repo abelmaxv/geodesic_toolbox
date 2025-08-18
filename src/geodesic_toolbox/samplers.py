@@ -416,12 +416,19 @@ class HMCSampler(Sampler):
         self._grad_U = torch.func.jacrev(self.U)
         self.grad_U = lambda z: self._grad_U(z).sum(1)
 
-    def p_target(self, z: Tensor) -> Tensor:
-        p = self.cometric(z).det().abs().sqrt()
-        return p
+    # def p_target(self, z: Tensor) -> Tensor:
+    #     p = self.cometric(z).det().abs().sqrt()
+    #     return p
 
-    def U(self, z: Tensor) -> Tensor:
-        return -torch.log(self.p_target(z))
+    # def U(self, z: Tensor) -> Tensor:
+    #     return -torch.log(self.p_target(z))
+
+    def U(self, z: Tensor)-> Tensor:
+        """
+        Compute the potential energy U(z) = -log(sqrt(det(g_inv(z))))= -1/2 * log(det(g_inv(z)))
+        """
+        g_inv = self.cometric(z)
+        return -0.5 * torch.logdet(g_inv)
 
     def K(self, v: Tensor) -> Tensor:
         return 1 / 2 * torch.einsum("bi,bi->b", v, v)  # v^T @ v
