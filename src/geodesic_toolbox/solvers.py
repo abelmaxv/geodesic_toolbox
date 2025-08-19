@@ -1339,7 +1339,7 @@ class SolverGraph(GeodesicDistanceSolver):
             traj_q = traj_q.unfold(0, 3, 1).mean(dim=2)
 
         # Resample the curve
-        cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q.cpu())
+        cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q.detach().cpu())
         traj_q = cs(np.arange(0, 1, self.dt))
         traj_q = torch.from_numpy(traj_q).float().to(q0.device)
         return traj_q
@@ -1995,7 +1995,7 @@ class SolverGraphFinsler(torch.nn.Module):
             traj_q = traj_q.unfold(0, 3, 1).mean(dim=2)
 
         # Resample the curve
-        cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q.cpu())
+        cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q.detach().cpu())
         traj_q = cs(np.arange(0, 1, self.dt))
         traj_q = torch.from_numpy(traj_q).float().to(q0.device)
         return traj_q
