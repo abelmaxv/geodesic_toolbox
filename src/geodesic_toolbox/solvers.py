@@ -2478,6 +2478,33 @@ class GEORCEFinsler(torch.nn.Module):
         self.alpha_0 = alpha_0
         self.pbar = pbar
 
+    def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor = None):
+        """Given a trajectory and the tangent vectors, compute the distance
+        under the finsler metric.
+
+        Parameters
+        ----------
+        traj : torch.Tensor (b,T,d)
+            The trajectory. There are b trajectories of T points in d dimensions
+        tangent_vectors : torch.Tensor (b,T,d)
+            The tangent vectors at each point of the trajectory
+            If None, the tangent vectors are computed as the difference between consecutive points.
+        Returns
+        -------
+        dst : torch.Tensor (b,)
+            The distance between the two points
+        """
+        if tangent_vectors is None:
+            # Compute the tangent vectors as the difference between consecutive points
+            tangent_vectors = torch.zeros_like(traj)
+            tangent_vectors[:, :-1, :] = traj[:, 1:, :] - traj[:, :-1, :]
+            tangent_vectors[:, -1, :] = traj[:, -1, :] - traj[:, -2, :]
+        distances = torch.stack(
+            [self.finsler(m, seg) for m, seg in zip(traj, tangent_vectors)]
+        )  # (B, T)
+        distances = distances.relu().sum(dim=1)  # (B,)
+        return distances
+
     def compute_energy(self, z_t, z0, zT, dx=None):
         """
         Compute the energy of the geodesic trajectory.
