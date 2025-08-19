@@ -1000,14 +1000,13 @@ class SolverGraph(GeodesicDistanceSolver):
                 Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length
                 Weight_matrix[curr_idx, batch_idx.view(-1, 1)] = curve_length
 
+        # Move to cpu to gain back memory if on gpu
+        # just to do this operation
+        Weight_matrix = Weight_matrix.cpu()
         # Make the weight matrix symmetric
         W = 0.5 * (Weight_matrix + Weight_matrix.T)
+        W = W.to(device=data.device, dtype=data.dtype)
 
-        # Check_graph_validity
-        if not torch.allclose(W, W.T):
-            raise ValueError("The weight matrix is not symmetric.")
-        if torch.any(W < 0):
-            raise ValueError("The weight matrix has negative weights.")
         self.weakly_connected = is_connected(Graph(W.cpu().numpy()))
         if not self.weakly_connected:
             W = self.connect_graph(W)
@@ -1620,10 +1619,7 @@ class SolverGraphFinsler(torch.nn.Module):
 
                 curve_length = rearrange(curve_length, "(b k) -> b k", b=batch_idx.shape[0])
                 Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length
-
-        # Check graph validity
-        if torch.any(Weight_matrix < 0):
-            raise ValueError("The weight matrix has negative weights.")
+        
         if not is_strongly_connected(DiGraph(Weight_matrix.cpu().numpy())):
             Weight_matrix = self.connect_graph(Weight_matrix)
         return Weight_matrix, knn
