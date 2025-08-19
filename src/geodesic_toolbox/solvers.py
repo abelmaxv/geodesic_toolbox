@@ -1010,7 +1010,7 @@ class SolverGraph(GeodesicDistanceSolver):
         self.weakly_connected = is_connected(Graph(W.cpu().numpy()))
         if not self.weakly_connected:
             W = self.connect_graph(W)
-        return W, knn
+        return W.to("cpu"), knn
 
     def get_cc_connections_idx(self, W, X):
         """
@@ -1198,7 +1198,7 @@ class SolverGraph(GeodesicDistanceSolver):
             closest_q1[b] = ind1[b, argmin_length]
         return closest_q0, closest_q1
 
-    def get_path_idx(self, start_idx: Tensor, end_idx: Tensor):
+    def get_path_idx(self, start_idx: Tensor, end_idx: Tensor,max_path_length:int=2000):
         """
         Given the start and end indices, retrieve the path in the graph.
 
@@ -1208,6 +1208,8 @@ class SolverGraph(GeodesicDistanceSolver):
             The starting indices
         end_idx : Tensor (B,)
             The ending indices
+        max_path_length : int
+            The maximum length of the path to retrieve for security reasons.
 
         Returns:
         --------
@@ -1221,7 +1223,7 @@ class SolverGraph(GeodesicDistanceSolver):
         iter = 0
         nb_pts_in_path = torch.zeros(B)
         # Simply properly retrieve the path
-        while (nb_pts_in_path == 0).any() and iter < 2000:
+        while (nb_pts_in_path == 0).any() and iter < max_path_length:
             iter += 1
             pred_idx = self.predecessors[start_idx, temp_idx]
             if (pred_idx == -9999).any():
@@ -1622,7 +1624,7 @@ class SolverGraphFinsler(torch.nn.Module):
         
         if not is_strongly_connected(DiGraph(Weight_matrix.cpu().numpy())):
             Weight_matrix = self.connect_graph(Weight_matrix)
-        return Weight_matrix, knn
+        return Weight_matrix.to("cpu"), knn
 
     def get_cc_connections_idx(self, W, X):
         """
