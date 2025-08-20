@@ -943,7 +943,7 @@ class SolverGraph(GeodesicDistanceSolver):
         self.b_size = batch_size
 
         self.W, self.knn = self.init_knn_graph(data, n_neighbors, batch_size)
-        self.predecessors = self.get_predecessors()
+        self.predecessors = self.get_predecessors(self.W)
 
     @torch.no_grad()
     def init_knn_graph(
@@ -1094,16 +1094,49 @@ class SolverGraph(GeodesicDistanceSolver):
         S = torch.exp(-W / (2 * sigma**2))
         return S
 
-    def get_predecessors(self) -> torch.Tensor:
+    def get_predecessors(self,W) -> torch.Tensor:
         """Get the predecessors for the shortest path computation..."""
         print("Computing predecessors...")
-        dst_matrix, predecessors = shortest_path(
-            csr_matrix(self.W.cpu().numpy()),
+        predecessors = shortest_path(
+            csr_matrix(W.cpu().numpy()),
             directed=False,
             return_predecessors=True,
-        )
+        )[1]
         print("Done.")
         return torch.from_numpy(predecessors)
+
+    ## This version is actually even slower than the one above fuck this
+    # def get_predecessors(self,W,device,censor_value=-9999) -> torch.Tensor:
+    #     """
+    #     Constructs a predecessors matrix from the paths dictionary.
+    #     The predecessors matrix is a square matrix where the entry (i, j) contains the predecessor
+    #     of node j on the shortest path from node i. If there is no path from i to j, the entry is censor_value.
+
+    #     Parameters:
+    #     W (torch.Tensor): The weight matrix of shape (n, n).
+    #     device (torch.device): The device on which the computation is performed.
+    #     censor_value (int): The value to use for entries where there is no path from i to j.
+
+    #     Returns:
+    #     np.ndarray: A 2D numpy array of shape (n, n) containing the predecessors.
+    #     """        
+    #     G = nx.from_numpy_array(W.cpu().numpy())
+        
+    #     if device.type == "cuda":
+    #         with nx.config.backends.cugraph(n_jobs=4):
+    #             paths = nx.all_pairs_dijkstra(G, weight="weight")
+    #     elif device.type == "cpu":
+    #         with nx.config.backends.parallel(n_jobs=4):
+    #             paths = nx.all_pairs_dijkstra(G, weight="weight")
+
+    #     n = G.number_of_nodes()
+    #     pred = np.full((n, n), censor_value, dtype=int)
+    #     for node_i, (dict_distance_i, dict_path_i) in paths:  # Fixed variable name
+    #         for node_j, paths_ij in dict_path_i.items():
+    #             if len(paths_ij) > 1:
+    #                 pred[node_i, node_j] = paths_ij[-2]
+    #     return torch.from_numpy(pred)
+
 
     def linear_interpolation(self, p_i, p_j, t):
         """
