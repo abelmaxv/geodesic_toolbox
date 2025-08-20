@@ -925,6 +925,10 @@ class SolverGraph(GeodesicDistanceSolver):
         The time step to use for the linear interpolation
     batch_size : int
         The size of the batch to use for the computation of the graph
+    max_data_count : int
+        The maximum number of data points to use for the graph. If None, all data points
+        are used. If the number of data points is larger than this value, the graph is
+        computed on a random subset of the data points to save memory.
     """
 
     def __init__(
@@ -934,8 +938,13 @@ class SolverGraph(GeodesicDistanceSolver):
         n_neighbors: int,
         dt: float = 0.01,
         batch_size: int = 64,
+        max_data_count: int | None = None,
     ) -> None:
         super().__init__(cometric)
+
+        if max_data_count is not None and data.shape[0] > max_data_count:
+            indices = torch.randperm(data.shape[0])[:max_data_count]
+            data = data[indices]
         self.data = data
         self.n_neighbors = n_neighbors
         self.dt = dt
@@ -1101,6 +1110,7 @@ class SolverGraph(GeodesicDistanceSolver):
             csr_matrix(W.cpu().numpy()),
             directed=False,
             return_predecessors=True,
+            overwrite=True,
         )[1]
         print("Done.")
         return torch.from_numpy(predecessors)
@@ -1577,6 +1587,10 @@ class SolverGraphFinsler(torch.nn.Module):
         The time step to use for the linear interpolation
     batch_size : int
         The size of the batch to use for the computation of the graph
+    max_data_count : int
+        The maximum number of data points to use for the graph. If None, all data points
+        are used. If the number of data points is larger than this value, the graph is
+        computed on a random subset of the data points to save memory.
     """
 
     def __init__(
@@ -1586,9 +1600,14 @@ class SolverGraphFinsler(torch.nn.Module):
         n_neighbors: int,
         dt: float = 0.01,
         batch_size: int = 64,
+        max_data_count: int | None = None,
     ) -> None:
         super().__init__()
         self.finsler_metric = finsler_metric
+
+        if max_data_count is not None and data.shape[0] > max_data_count:
+            indices = torch.randperm(data.shape[0])[:max_data_count]
+            data = data[indices]
         self.data = data
         self.n_neighbors = n_neighbors
         self.dt = dt
@@ -2979,6 +2998,7 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
         c=0.9,
         alpha_0: float = 1.0,
         pbar_georce: bool = False,
+        max_data_count: None | int = None,
     ):
         super().__init__(cometric=cometric)
         dt = 1.0 / T
@@ -2988,6 +3008,7 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
             n_neighbors=n_neighbors,
             dt=dt,
             batch_size=batch_size,
+            max_data_count=max_data_count,
         )
         self.georce_solver = GEORCE(
             cometric=cometric,
@@ -3047,6 +3068,7 @@ class SolverGraphGEORCEFinsler(GEORCEFinsler):
         c=0.9,
         alpha_0: float = 1.0,
         pbar_georce: bool = False,
+        max_data_count: None | int = None,
     ):
         super().__init__(
             finsler=finsler,
@@ -3065,6 +3087,7 @@ class SolverGraphGEORCEFinsler(GEORCEFinsler):
             n_neighbors=n_neighbors,
             dt=dt,
             batch_size=batch_size,
+            max_data_count=max_data_count,
         )
 
     def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
