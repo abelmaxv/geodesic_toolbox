@@ -585,9 +585,7 @@ class DiffeoCometric(CoMetric):
         if hasattr(self.diffeo, "jacobian"):
             self.jacobian = self.diffeo.jacobian
         else:
-            # jacobian_ = torch.func.jacrev(self.diffeo)
-            # self.jacobian = lambda x: torch.einsum("bibj->bij", jacobian_(x))
-            no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0))[0].flatten(1).squeeze(0)
+            no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
             jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
             # self.jacobian = torch.vmap(jacobian_,chunk_size=chunk_size)
             self.jacobian = torch.vmap(jacobian_, chunk_size=None)
@@ -1044,9 +1042,9 @@ class CentroidsCometric(CoMetric):
             centroids is None and cometric_centroids is None
         ), "Either both centroids and cometric_centroids should be provided or none."
         if cometric_centroids is not None:
-            assert self.assess_cometric_tensor_symmetry(
+            cometric_centroids = self.assess_cometric_tensor_symmetry(
                 cometric_centroids
-            ), "Cometric centroids should be symetric matrices."
+            )
             ## We don't really need to enforce strict psd as we use
             ## a regularization term to ensure numerical stability.
             # assert self.assess_cometric_tensor_psd(
@@ -1074,12 +1072,11 @@ class CentroidsCometric(CoMetric):
         if cometric_centroids.ndim != 3 or cometric_centroids.size(
             1
         ) != cometric_centroids.size(2):
-            print("Bad shape", cometric_centroids)
-            return False
+            raise ValueError(f"Cometric centroids should be of shape (K,d,d), got {cometric_centroids.shape}")
         if not torch.allclose(cometric_centroids, cometric_centroids.mT):
-            print("Not symmetric:", cometric_centroids)
-            return False
-        return True
+            # Make it symmetric
+            cometric_centroids = (cometric_centroids + cometric_centroids.mT) / 2
+        return cometric_centroids
 
     def assess_cometric_tensor_psd(self, cometric_centroids: Tensor) -> bool:
         """Check if the cometric tensor is positive semi-definite."""
