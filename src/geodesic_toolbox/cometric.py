@@ -1043,9 +1043,15 @@ class CentroidsCometric(CoMetric):
         assert (centroids is not None and cometric_centroids is not None) or (
             centroids is None and cometric_centroids is None
         ), "Either both centroids and cometric_centroids should be provided or none."
-        assert cometric_centroids is None or self.assess_cometric_tensor(
-            cometric_centroids
-        ), "Cometric centroids should be symetric positive semi-definite matrices."
+        if cometric_centroids is not None:
+            assert self.assess_cometric_tensor_symmetry(
+                cometric_centroids
+            ), "Cometric centroids should be symetric matrices."
+            ## We don't really need to enforce strict psd as we use
+            ## a regularization term to ensure numerical stability.
+            # assert self.assess_cometric_tensor_psd(
+            #     cometric_centroids
+            # ), "Cometric centroids should be positive semi-definite matrices."
 
         if centroids is not None:
             self.register_buffer("centroids", centroids)
@@ -1063,14 +1069,20 @@ class CentroidsCometric(CoMetric):
 
         self.metric_weight = metric_weight
 
-    def assess_cometric_tensor(self, cometric_centroids: Tensor) -> bool:
+    def assess_cometric_tensor_symmetry(self, cometric_centroids: Tensor) -> bool:
         """Check if the cometric tensor is symmetric positive semi-definite."""
         if cometric_centroids.ndim != 3 or cometric_centroids.size(
             1
         ) != cometric_centroids.size(2):
+            print("Bad shape", cometric_centroids)
             return False
         if not torch.allclose(cometric_centroids, cometric_centroids.mT):
+            print("Not symmetric:", cometric_centroids)
             return False
+        return True
+
+    def assess_cometric_tensor_psd(self, cometric_centroids: Tensor) -> bool:
+        """Check if the cometric tensor is positive semi-definite."""
         try:
             torch.linalg.cholesky(cometric_centroids)
             return True
