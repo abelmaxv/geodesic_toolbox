@@ -367,6 +367,8 @@ class HMCSampler(Sampler):
     """
     Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
     It uses the leapfrog integrator to propose new samples from the target distribution.
+    The hamiltonian dynamics is :
+    H(p,q) = U(q) + p^T p / 2  (separable Hamiltonian)
     It uses a tempering scheme on the momentum.
     Here the target distribution is defined by the volume element of the cometric.
     But this class is easily heritable to define other target distributions. Just redefine
@@ -386,6 +388,8 @@ class HMCSampler(Sampler):
         The bounds of the target distribution. This is because the distribution must be supported on a bounded set.
     beta_0 : float
         The initial temperature for the tempering of the momentum.
+    std_0 : float
+        The standard deviation of the initial momentum.
     pbar : bool
         If True, it shows a progress bar.
     skip_acceptance : bool
@@ -400,6 +404,7 @@ class HMCSampler(Sampler):
         N_run: int,
         bounds: float = 1e3,
         beta_0: float = 1,
+        std_0: float = 1,
         pbar: bool = False,
         skip_acceptance: bool = False,
     ):
@@ -410,49 +415,128 @@ class HMCSampler(Sampler):
         self.N_run = N_run
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
+        self.std_0 = std_0
         self.skip_acceptance = skip_acceptance
 
         # @TODO : make this faster
-        self._grad_U = torch.func.jacrev(self.U)
-        self.grad_U = lambda z: self._grad_U(z).sum(1)
+        no_batch_forward = lambda x: self.U(x.unsqueeze(0)).flatten()
+        self._grad_U = torch.vmap(torch.func.jacrev(no_batch_forward))
+        self.grad_U = lambda z: self._grad_U(z).squeeze(1)
 
-    # def p_target(self, z: Tensor) -> Tensor:
-    #     p = self.cometric(z).det().abs().sqrt()
-    #     return p
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     return -torch.log(self.p_target(z))
-
-    def U(self, z: Tensor)-> Tensor:
+    def U(self, z: Tensor) -> Tensor:
         """
         Compute the potential energy U(z) = -log(sqrt(det(g_inv(z))))= -1/2 * log(det(g_inv(z)))
+
+        Parameters
+        ----------
+        z : Tensor (b,d)
+            The position.
+
+        Returns
+        -------
+        potential energy : Tensor (b,)
         """
         g_inv = self.cometric(z)
         return -0.5 * torch.logdet(g_inv)
 
     def K(self, v: Tensor) -> Tensor:
+        """
+        Compute the kinetic energy K(v) = 1/2 * v^T v
+
+        Parameters
+        ----------
+        v : Tensor (b,d)
+            The velocity.
+
+        Returns
+        -------
+        kinetic energy : Tensor (b,)
+        """
         return 1 / 2 * torch.einsum("bi,bi->b", v, v)  # v^T @ v
 
     def H(self, z: Tensor, v: Tensor) -> Tensor:
+        """
+        Compute the Hamiltonian H(z,v) = U(z) + K(v)
+
+        Parameters
+        ----------
+        z : Tensor (b,d)
+            The position.
+        v : Tensor (b,d)
+            The velocity.
+
+        Returns
+        -------
+        Tensor (b,)
+        """
         return self.U(z) + self.K(v)
 
-    def leapfrog_step(self, z: Tensor, v: Tensor) -> Tensor:
+    def leapfrog_step(self, z: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Perform a single leapfrog step assuming the Hamiltonian is separable and K(v) = 1/2 * v^T v.
+
+        Parameters
+        ----------
+        z : Tensor (b,d)
+            The initial position.
+        v : Tensor (b,d)
+            The initial velocity.
+
+        Returns
+        -------
+        z_new : Tensor (b,d)
+            The new position.
+        v_new : Tensor (b,d)
+            The new velocity.
+        """
         v_half = v - self.gamma / 2 * self.grad_U(z)
         z_new = z + self.gamma * v_half
         v_new = v_half - self.gamma / 2 * self.grad_U(z_new)
         return z_new, v_new
 
-    def tempering(self, k):
+    def tempering(self, k) -> float:
+        """
+        Compute the tempering coefficient at step k.
+
+        Parameters
+        ----------
+        k : int
+            The current step.
+
+        Returns
+        -------
+        beta_k : float
+            The tempering coefficient at step k.
+        """
         beta_k = ((1 - 1 / self.beta_0_sqrt) * (k / self.N_run) ** 2) + 1 / self.beta_0_sqrt
         return beta_k
 
     def proposal_rate(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
+        """
+        Compute the proposal rates based on the value of the Hamiltonian.
+
+        Parameters
+        ----------
+        z : Tensor (b,d)
+            The initial position.
+        v : Tensor (b,d)
+            The initial velocity.
+        z_new : Tensor (b,d)
+            The new position.
+        v_new : Tensor (b,d)
+            The new velocity.
+
+        Returns
+        -------
+        Tensor (b,)
+            The proposal rates.
+        """
         alpha = torch.exp(-self.H(z_new, v_new) + self.H(z, v))
         return torch.min(torch.ones_like(alpha), alpha)
 
     def get_alpha(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
         """
-        Compute the proposal rates.
+        Compute the proposal rates by combining the proposal_rate method and the bounds.
         If the new sample is out of bounds, the proposal rate is 0.
 
         Parameters
@@ -478,14 +562,51 @@ class HMCSampler(Sampler):
             alpha[out_of_bounds] = 0
         return alpha
 
-    def leapfrog(self, z: Tensor, v: Tensor) -> Tensor:
+    def leapfrog(
+        self, z: Tensor, v: Tensor, return_traj: bool = False
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Perform l leapfrog steps with tempering of the momentum.
+
+        Parameters
+        ----------
+        z : Tensor (b,d)
+            The initial position.
+        v : Tensor (b,d)
+            The initial velocity.
+        return_traj : bool
+            If True, it returns the trajectory of the samples over the l leapfrog steps.
+
+        Returns
+        -------
+        z_new : Tensor (b,d)
+            The new position.
+        v_new : Tensor (b,d)
+            The new velocity.
+        or
+        (Tensor (b,l+1,d), Tensor (b,l+1,d))
+            The trajectory of the positions and velocities over the l leapfrog steps.
+        """
         z_new, v_new = z.clone(), v.clone()
+        if return_traj:
+            traj_q = [z_new.clone()]
+            traj_p = [v_new.clone()]
         beta_k_minus_1_sqrt = self.beta_0_sqrt
         for k in range(self.l):
             z_new, v_new = self.leapfrog_step(z_new, v_new)
             beta_k_sqrt = self.tempering(k)
             v_new = (beta_k_minus_1_sqrt / beta_k_sqrt) * v_new
             beta_k_minus_1_sqrt = beta_k_sqrt
+
+            if return_traj:
+                traj_q.append(z_new.clone())
+                traj_p.append(v_new.clone())
+
+        if return_traj:
+            traj_q = torch.stack(traj_q, dim=1)
+            traj_p = torch.stack(traj_p, dim=1)
+            return traj_q, traj_p
+
         return z_new, v_new
 
     @torch.no_grad()
@@ -529,7 +650,7 @@ class HMCSampler(Sampler):
             pbar = range(self.N_run)
 
         for k in pbar:
-            v_0 = torch.randn_like(z)
+            v_0 = torch.randn_like(z) * self.std_0
             try:
                 z_l, v_l = self.leapfrog(z, v_0)
                 alpha = self.get_alpha(z, v_0, z_l, v_l)
@@ -562,12 +683,13 @@ class HMCSampler(Sampler):
 
         if return_traj:
             traj = torch.stack(traj, dim=1)
-            if not self.skip_acceptance:
+            if return_acceptance:
                 return traj, acceptance_rate
+            else:
+                return traj
         if return_acceptance:
             return z, acceptance_rate
-        else:
-            return z
+        return z
 
 
 # =================================================================================
@@ -790,7 +912,8 @@ class ImplicitRHMCSampler(Sampler):
         return p
 
     def U(self, z: Tensor) -> Tensor:
-        return -torch.log(self.p_target(z))
+        g_inv = self.cometric(z)
+        return -0.5 * torch.logdet(g_inv)
 
     def K(self, v: Tensor) -> Tensor:
         g_inv = self.cometric(v)
