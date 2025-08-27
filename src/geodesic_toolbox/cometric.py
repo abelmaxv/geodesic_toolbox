@@ -64,6 +64,27 @@ def empirical_diag_cov_mat(x: Tensor, mu: Tensor = None, eps: float = 1e-6):
     return cov
 
 
+def mat_sqrt(A: Tensor) -> Tensor:
+    """
+    Compute the matrix square root of a positive definite matrix A.
+
+    Parameters
+    ----------
+    A : Tensor (..., n, n)
+        The matrix to compute the square root of.
+
+    Returns
+    -------
+    Tensor (..., n, n)
+        The matrix square root of A.
+    """
+    L, Q = torch.linalg.eigh(A)
+    zero = torch.zeros((), device=L.device, dtype=L.dtype)
+    threshold = L.max(-1).values * L.size(-1) * torch.finfo(L.dtype).eps
+    L = L.where(L > threshold.unsqueeze(-1), zero)  # zero out small components
+    return (Q * L.sqrt().unsqueeze(-2)) @ Q.mH
+
+
 def SoftAbs(M, alpha=1e3):
     """
     SoftAbs regularisation of a matrix M. It is used to ensure that the matrix is positive definite.
@@ -320,6 +341,22 @@ class IdentityCoMetric(CoMetric):
 
     def extra_repr(self) -> str:
         return f"coscale={self.coscale}"
+
+
+class SoftAbsCometric(CoMetric):
+    def __init__(self, base_cometric: CoMetric, alpha: float = 1e3):
+        super().__init__()
+        self.base_cometric = base_cometric
+        self.alpha = alpha
+
+    def metric_tensor(self, q):
+        g = self.base_cometric.metric(q)
+        g_soft = SoftAbs(g, self.alpha)
+        return g_soft
+    
+    def forward(self, q):
+        g_soft = self.metric_tensor(q)
+        return torch.linalg.inv(g_soft)
 
 
 ################################################################
@@ -1042,9 +1079,7 @@ class CentroidsCometric(CoMetric):
             centroids is None and cometric_centroids is None
         ), "Either both centroids and cometric_centroids should be provided or none."
         if cometric_centroids is not None:
-            cometric_centroids = self.assess_cometric_tensor_symmetry(
-                cometric_centroids
-            )
+            cometric_centroids = self.assess_cometric_tensor_symmetry(cometric_centroids)
             ## We don't really need to enforce strict psd as we use
             ## a regularization term to ensure numerical stability.
             # assert self.assess_cometric_tensor_psd(
@@ -1072,7 +1107,9 @@ class CentroidsCometric(CoMetric):
         if cometric_centroids.ndim != 3 or cometric_centroids.size(
             1
         ) != cometric_centroids.size(2):
-            raise ValueError(f"Cometric centroids should be of shape (K,d,d), got {cometric_centroids.shape}")
+            raise ValueError(
+                f"Cometric centroids should be of shape (K,d,d), got {cometric_centroids.shape}"
+            )
         if not torch.allclose(cometric_centroids, cometric_centroids.mT):
             # Make it symmetric
             cometric_centroids = (cometric_centroids + cometric_centroids.mT) / 2
