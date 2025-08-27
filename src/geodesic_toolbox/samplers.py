@@ -4,28 +4,7 @@ from tqdm import tqdm
 from torch import Tensor
 from torch.linalg import LinAlgError as _LinAlgError
 
-from .cometric import CoMetric
-
-
-def mat_sqrt(A: Tensor) -> Tensor:
-    """
-    Compute the matrix square root of a positive definite matrix A.
-
-    Parameters
-    ----------
-    A : Tensor (..., n, n)
-        The matrix to compute the square root of.
-
-    Returns
-    -------
-    Tensor (..., n, n)
-        The matrix square root of A.
-    """
-    L, Q = torch.linalg.eigh(A)
-    zero = torch.zeros((), device=L.device, dtype=L.dtype)
-    threshold = L.max(-1).values * L.size(-1) * torch.finfo(L.dtype).eps
-    L = L.where(L > threshold.unsqueeze(-1), zero)  # zero out small components
-    return (Q * L.sqrt().unsqueeze(-2)) @ Q.mH
+from .cometric import CoMetric, mat_sqrt
 
 
 class Sampler(nn.Module):
@@ -802,7 +781,7 @@ class MMALA(Sampler):
     def K(self, v: Tensor) -> Tensor:
         g_inv = self.cometric(v)
         det_g = 1 / g_inv.det()
-        velocity = torch.einsum("bi,bij,bj->b", v, g_inv, v)
+        velocity = torch.einsum("bj,bij,bi->b", v, g_inv, v)
         return 0.5 * velocity + 0.5 * torch.log(det_g)
 
     def H(self, z: Tensor) -> Tensor:
@@ -930,6 +909,7 @@ class ImplicitRHMCSampler(Sampler):
         beta_0: float = 1,
         pbar: bool = False,
         skip_acceptance: bool = False,
+        threshold_fx: float = 1e-5,
     ):
         super().__init__(pbar)
         self.cometric = cometric
@@ -941,6 +921,7 @@ class ImplicitRHMCSampler(Sampler):
         self.bounds = bounds
         self.beta_0_sqrt = beta_0**0.5
         self.skip_acceptance = skip_acceptance
+        self.threshold_fx = threshold_fx
 
         no_batch_U = lambda x: self.U(x.unsqueeze(0)).squeeze(0)
         self._grad_U = torch.vmap(torch.func.jacrev(no_batch_U))
@@ -1005,7 +986,7 @@ class ImplicitRHMCSampler(Sampler):
         """
         g_inv = self.cometric(v)
         logdet_ginv = torch.logdet(g_inv)
-        velocity = torch.einsum("bi,bij,bj->b", v, g_inv, v)
+        velocity = torch.einsum("bj,bij,bi->b", v, g_inv, v)
         return 0.5 * velocity - 0.5 * logdet_ginv + 0.5 * v.shape[1] * self.log2pi
 
     def H(self, z: Tensor, v: Tensor) -> Tensor:
@@ -1044,7 +1025,11 @@ class ImplicitRHMCSampler(Sampler):
         """
         v_half = v.clone()
         for k in range(self.N_fx):
-            v_half = v_half - self.gamma * self.dH_dz(z, v_half) / 2
+            v_half_ = v_half - self.gamma * self.dH_dz(z, v_half) / 2
+            if (v_half_ - v_half).abs().max() < self.threshold_fx:
+                v_half = v_half_
+                break
+            v_half = v_half_
         return v_half
 
     def get_z_new(self, z: Tensor, v_half: Tensor) -> Tensor:
@@ -1066,9 +1051,13 @@ class ImplicitRHMCSampler(Sampler):
         """
         z_new = z.clone()
         for k in range(self.N_fx):
-            z_new = (
+            z_new_ = (
                 z_new + self.gamma * (self.dH_dv(z, v_half) + self.dH_dv(z_new, v_half)) / 2
             )
+            if (z_new_ - z_new).abs().max() < self.threshold_fx:
+                z_new = z_new_
+                break
+            z_new = z_new_
         return z_new
 
     def leapfrog_step(self, z: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
@@ -1247,9 +1236,6 @@ class ImplicitRHMCSampler(Sampler):
             pbar = range(self.N_run)
 
         for k in pbar:
-            # v_0 = torch.randn_like(z) * self.std_0
-            # # Transform to momentum
-            # v_0 = torch.einsum("bij,bj->bi", self.cometric.metric_tensor(z), v_0)
             # Sample v_0 ~ N(0, g(z))
             v_0 = torch.randn_like(z)
             g = self.cometric.metric_tensor(z)
@@ -1362,6 +1348,8 @@ class ExplicitRHMCSampler(Sampler):
         self.dH_dz = lambda z, v: self._dH_dz_(z, v).sum(1)
         self.dH_dv = lambda z, v: self._dH_dv(z, v).sum(1)
 
+        self.log2pi = torch.log(torch.tensor(2 * 3.1415927410125732))
+
     def p_target(self, z: Tensor) -> Tensor:
         p = self.cometric(z).det().abs().sqrt()
         return p
@@ -1371,10 +1359,9 @@ class ExplicitRHMCSampler(Sampler):
 
     def K(self, v: Tensor) -> Tensor:
         g_inv = self.cometric(v)
-        det_g = 1 / g_inv.det().abs()
-        velocity = torch.einsum("bi,bij,bj->b", v, g_inv, v)
-        return 0.5 * velocity + 0.5 * torch.log(det_g + 1e-6)
-
+        logdet_ginv = torch.logdet(g_inv)
+        velocity = torch.einsum("bj,bij,bi->b", v, g_inv, v)
+        return 0.5 * velocity - 0.5 * logdet_ginv + 0.5 * v.shape[1] * self.log2pi
     def H_base(self, z: Tensor, v: Tensor) -> Tensor:
         return self.U(z) + self.K(v)
 
