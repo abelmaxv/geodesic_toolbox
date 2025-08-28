@@ -1356,8 +1356,8 @@ class ExplicitRHMCSampler(Sampler):
         gamma: float,
         omega: float,
         N_run: int,
+        bounds: float,
         std_0: float = 1.0,
-        bounds: float = 1e3,
         beta_0: float = 1,
         pbar: bool = False,
         skip_acceptance: bool = False,
@@ -1660,11 +1660,12 @@ class ExplicitRHMCSampler(Sampler):
             The proposal rates.
         """
         alpha = self.proposal_rate(z_l_0, v_l_0, z_l_1, v_l_1, z_0, v0, z_1, v1)
-        z_0_norm = torch.linalg.norm(z_l_0, dim=-1)
-        z_1_norm = torch.linalg.norm(z_l_1, dim=-1)
-        z_norm = torch.max(z_0_norm, z_1_norm)
-        out_of_bounds = z_norm > self.bounds
-        alpha[out_of_bounds] = 0
+        if self.bounds is not None:
+            z_0_norm = torch.linalg.norm(z_l_0, dim=-1)
+            z_1_norm = torch.linalg.norm(z_l_1, dim=-1)
+            z_norm = torch.max(z_0_norm, z_1_norm)
+            out_of_bounds = z_norm > self.bounds
+            alpha[out_of_bounds] = 0
         return alpha
 
     def leapfrog(
