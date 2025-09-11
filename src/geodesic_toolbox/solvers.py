@@ -2129,9 +2129,6 @@ class GEORCE(GeodesicDistanceSolver):
         pbar: bool = False,
     ):
         super().__init__()
-        if cometric.is_diag:
-            raise NotImplementedError("GEORCE not implemented/tested for diagonal cometrics")
-
         self.cometric = cometric
         self.T = T
         self.max_iter = max_iter
@@ -2294,7 +2291,7 @@ class GEORCE(GeodesicDistanceSolver):
         """
         full_traj = torch.cat([x_0[None, :], x_t, x_T[None, :]], dim=0)  # (T+1, d)
         dx = full_traj[1:] - full_traj[:-1]  # (T, d)
-        distance = self.cometric.metric(full_traj[:-1],dx).sqrt() # (T,)
+        distance = self.cometric.metric(full_traj[:-1], dx).sqrt()  # (T,)
         return distance.sum()
 
     def georce_solver(
@@ -2372,16 +2369,18 @@ class GEORCE(GeodesicDistanceSolver):
             # L5
             G_inv_t = self.cometric.cometric_tensor(x_t_i)
             G_inv_t = torch.cat([G_inv_0[None, :], G_inv_t], dim=0)  # (T, d, d) | (T, d, d)
-            if G_inv_t.ndim==3:
+            if G_inv_t.ndim == 3:
                 G_t = G_inv_t.inverse()  # (T, d, d)
             else:
-                G_t = 1/ G_inv_t # (T,d)
+                G_t = 1 / G_inv_t  # (T,d)
 
             # L6
-            if G_inv_t.ndim==3:
-                v_t = torch.einsum("tj, tji, ti -> tj", u_t_i[1:], G_t[1:], u_t_i[1:])  # (T-1, d)
+            if G_inv_t.ndim == 3:
+                v_t = torch.einsum(
+                    "tj, tji, ti -> tj", u_t_i[1:], G_t[1:], u_t_i[1:]
+                )  # (T-1, d)
             else:
-                v_t = u_t_i[1:]* G_t[1:]* u_t_i[1:]  # (T-1, d)
+                v_t = u_t_i[1:] * G_t[1:] * u_t_i[1:]  # (T-1, d)
             v_t = torch.autograd.grad(
                 v_t.sum(),
                 x_t_i,
@@ -2392,10 +2391,10 @@ class GEORCE(GeodesicDistanceSolver):
             mu_t = self.get_mut_t(v_t, G_inv_t, diff)  # (T, d)
 
             # L8
-            if G_inv_t.ndim==3:
+            if G_inv_t.ndim == 3:
                 u_t = -0.5 * torch.einsum("tij,tj->ti", G_inv_t, mu_t)  # (T, d)
             else:
-                 u_t = -0.5 * G_inv_t* mu_t # (T, d)
+                u_t = -0.5 * G_inv_t * mu_t  # (T, d)
             # L9/19
             alpha = self.line_search(x_0, x_T, u_t, u_t_i, x_t_i)
             # alpha = 0.1
