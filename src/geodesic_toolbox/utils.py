@@ -139,7 +139,10 @@ def magnification_factor(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
         Magnification factor
     """
     G_inv = g_inv.cometric_tensor(z)
-    return torch.det(G_inv).abs().pow(-0.5)
+    if not g_inv.is_diag:
+        return torch.det(G_inv).abs().pow(-0.5)
+    else:
+        return torch.prod(G_inv, dim=1).abs().pow(-0.5)
 
 
 def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
@@ -161,7 +164,10 @@ def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tenso
         Magnification factor
     """
     G = g_inv.metric_tensor(z)
-    return torch.det(G).abs().pow(0.5)
+    if not g_inv.is_diag:
+        return torch.det(G).abs().pow(0.5)
+    else:
+        return torch.prod(G, dim=1).abs().pow(0.5)
 
 
 @torch.jit.script
