@@ -138,7 +138,7 @@ def magnification_factor(g_inv: CoMetric, z: torch.Tensor) -> torch.Tensor:
     mf : torch.Tensor (b,)
         Magnification factor
     """
-    G_inv = g_inv(z)
+    G_inv = g_inv.cometric_tensor(z)
     return torch.det(G_inv).abs().pow(-0.5)
 
 
@@ -160,7 +160,7 @@ def magnification_factor_metric(g_inv: CoMetric, z: torch.Tensor) -> torch.Tenso
     mf : torch.Tensor (b,)
         Magnification factor
     """
-    G = g_inv.metric(z)
+    G = g_inv.metric_tensor(z)
     return torch.det(G).abs().pow(0.5)
 
 
@@ -308,9 +308,10 @@ def get_mf_image(
 
     if embeddings is not None:
         device = embeddings.device
+        dtype = embeddings.dtype
 
-    x_plot = torch.linspace(min_x, max_x, resolution, device=device)
-    y_plot = torch.linspace(min_y, max_y, resolution, device=device)
+    x_plot = torch.linspace(min_x, max_x, resolution, device=device, dtype=dtype)
+    y_plot = torch.linspace(min_y, max_y, resolution, device=device, dtype=dtype)
     xx, yy = torch.meshgrid(x_plot, y_plot, indexing="ij")
     Q = torch.stack([xx, yy], dim=-1)
     W, H, _ = Q.shape
