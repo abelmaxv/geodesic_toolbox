@@ -130,8 +130,9 @@ class CoMetric(torch.nn.Module):
     A cometric is here a function that takes a (batch of) point and returns the cometric tensor at that point.
     """
 
-    def __init__(self):
+    def __init__(self, is_diag: bool = False):
         super().__init__()
+        self.is_diag = is_diag
 
     def cometric_tensor(self, q: Tensor) -> Tensor:
         """Computes G^-1(q) for a batch of points q
@@ -141,6 +142,7 @@ class CoMetric(torch.nn.Module):
 
         Output:
         res : Tensor (b,d,d) inverse metric tensor
+            or Tensor (b,d) if is_diag is True
         """
         return self.forward(q)
 
@@ -152,33 +154,70 @@ class CoMetric(torch.nn.Module):
 
         Output:
         res : Tensor (b,d,d) metric tensor
+            or Tensor (b,d) if is_diag is True
         """
-        return self.cometric_tensor(q).inverse()
+        if not self.is_diag:
+            return self.cometric_tensor(q).inverse()
+        else:
+            return 1 / self.cometric_tensor(q)
 
-    def metric(self, q: Tensor) -> Tensor:
-        """Computes G(q) for a batch of points q
+    def dot(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
+        """Computes u^T G(q) v for a batch of points q at tangent vectors u and v
 
         Params:
         q : Tensor (b,d) batch of points
+        u : Tensor (b,d) first tangent vector
+        v : Tensor (b,d) second tangent vector
 
         Output:
-        res : Tensor (b,d,d) metric tensor
+        res : Tensor (b,) u^T G(q) v
         """
-        return torch.linalg.inv(self.forward(q))
-        # @TODO change this function to v^TG(q)v and all of the rest of the code
-        return torch.einsum("bi,bij->bj", v, self.metric_tensor(q), v)
+        G = self.metric_tensor(q)
+        if not self.is_diag:
+            return torch.einsum("bi,bij,bj->b", u, G, v)
+        else:
+            return torch.sum(u * G * v, dim=1)
+
+    def inv_dot(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
+        """Computes u^T G_inv(q) v for a batch of points q at tangent vectors u and v
+
+        Params:
+        q : Tensor (b,d) batch of points
+        u : Tensor (b,d) first tangent vector
+        v : Tensor (b,d) second tangent vector
+
+        Output:
+        res : Tensor (b,) u^T G_inv(q) v
+        """
+        G_inv = self.cometric_tensor(q)
+        if self.is_diag:
+            return torch.sum(u * G_inv * v, dim=1)
+        else:
+            return torch.einsum("bi,bij,bj->b", u, G_inv, v)
+
+    def metric(self, q: Tensor, p: Tensor) -> Tensor:
+        """Computes p^TG(q)p for a batch of tangent vectors p at points q
+
+        Params:
+        q : Tensor (b,d) batch of points
+        p : Tensor (b,d) batch of tangent vectors
+
+        Output:
+        res : Tensor (b,) p^TG(q)p
+        """
+        return self.dot(q, p, p)
 
     def cometric(self, q: Tensor, v: Tensor) -> Tensor:
-        """Computes v^T G(q) v for a batch of points q at momenta v
+        """Computes v^T G_inv(q) v for a batch of points q at momenta v
 
         Params:
         q : Tensor (b,d) batch of points
         v : Tensor (b,d) batch of momenta
 
         Output:
-        res : Tensor (b,) G(q)@v
+        res : Tensor (b,) v^T G_inv(q) v
         """
-        return torch.einsum("bij,bi->b", self.cometric_tensor(q), v)
+        return self.inv_dot(q, v, v)
 
     def forward(self, q: Tensor) -> Tensor:
         """Computes G^-1(q) for a batch of points q
@@ -188,21 +227,22 @@ class CoMetric(torch.nn.Module):
 
         Output:
         res : Tensor (b,d,d) inverse metric tensor
+            or Tensor (b,d) if is_diag is True
         """
         raise NotImplementedError
 
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        """Computes G(q)@p for a batch of points q at momenta p
+    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+    #     """Computes G(q)@p for a batch of points q at momenta p
 
-        Params:
-        q : Tensor (b,d) batch of points
-        p : Tensor (b,d) batch of momenta
+    #     Params:
+    #     q : Tensor (b,d) batch of points
+    #     p : Tensor (b,d) batch of momenta
 
-        Output:
-        res : Tensor (b,d) G(q)@p
-        """
-        # return torch.linalg.solve_ex(self.forward(q), p)
-        return torch.linalg.solve(self.forward(q), p)
+    #     Output:
+    #     res : Tensor (b,d) G(q)@p
+    #     """
+    #     # return torch.linalg.solve_ex(self.forward(q), p)
+    #     return torch.linalg.solve(self.forward(q), p)
 
     def angle(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
         """
@@ -217,10 +257,9 @@ class CoMetric(torch.nn.Module):
         angle : Tensor (b,) angle between u and v at q
         """
         eps = 1e-8  # small value to avoid division by zero
-        g = self.metric_tensor(q)
-        u_norm = torch.einsum("bi,bij,bj->b", u, g, u).sqrt()
-        v_norm = torch.einsum("bi,bij,bj->b", v, g, v).sqrt()
-        uv = torch.einsum("bi,bij,bj->b", u, g, v)
+        u_norm = self.metric(q, u).sqrt()
+        v_norm = self.metric(q, v).sqrt()
+        uv = self.dot(q, u, v)
         cos_angle = uv / (u_norm * v_norm + eps)
         cos_angle = torch.clamp(cos_angle, -1.0, 1.0)  # clamp to avoid NaN
         angle = torch.acos(cos_angle)
@@ -250,11 +289,15 @@ class CoMetric(torch.nn.Module):
 
         Output:
         id : Tensor (b,d,d) batch of identity matrices
+            or (b,d) if is_diag is True
         """
         B, dim = x.shape
-        id = torch.eye(dim, dtype=x.dtype, device=x.device).unsqueeze(0)
-        id = id.repeat(B, 1, 1)
-        return id
+        if self.is_diag:
+            return torch.ones_like(x)
+        else:
+            id = torch.eye(dim, dtype=x.dtype, device=x.device).unsqueeze(0)
+            id = id.repeat(B, 1, 1)
+            return id
 
 
 class SumOfCometric(CoMetric):
@@ -276,16 +319,26 @@ class SumOfCometric(CoMetric):
         self.cometric1 = cometric1
         self.cometric2 = cometric2
 
-    def metric(self, q: torch.Tensor):
-        return self.cometric1.metric(q) + self.cometric2.metric(q)
+        if self.cometric1.is_diag and self.cometric2.is_diag:
+            self.is_diag = True
+        else:
+            self.is_diag = False
 
     def forward(self, q: torch.Tensor):
-        return torch.linalg.inv(self.metric(q))
+        G_1 = self.cometric1.cometric_tensor(q)
+        G_2 = self.cometric2.cometric_tensor(q)
+        if not self.cometric1.is_diag and not self.cometric2.is_diag:
+            G_2 = torch.diag_embed(G_2)
+            return G_1 + G_2
+        elif not self.cometric1.is_diag and self.cometric2.is_diag:
+            G_1 = torch.diag_embed(G_1)
+            return G_1 + G_2
+        return G_1 + G_2
 
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        v_1 = self.cometric1.inverse_forward(q, p)
-        v_2 = self.cometric2.inverse_forward(q, p)
-        return v_1 + v_2
+    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+    #     v_1 = self.cometric1.inverse_forward(q, p)
+    #     v_2 = self.cometric2.inverse_forward(q, p)
+    #     return v_1 + v_2
 
 
 class ScaledCometric(CoMetric):
@@ -303,17 +356,18 @@ class ScaledCometric(CoMetric):
 
     def __init__(self, cometric: CoMetric, beta: float):
         super().__init__()
-        self.cometric = cometric
+        self.cometric_ = cometric
         self.beta = beta
+        self.is_diag = cometric.is_diag
 
     def forward(self, q: Tensor) -> Tensor:
-        return 1 / self.beta * self.cometric.forward(q)
+        return 1 / self.beta * self.cometric_.forward(q)
 
-    def metric(self, q: Tensor) -> Tensor:
-        return self.beta * self.cometric.metric(q)
+    def metric_tensor(self, q: Tensor) -> Tensor:
+        return self.beta * self.cometric_.metric_tensor(q)
 
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        return self.beta * self.cometric.inverse_forward(q, p)
+    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+    #     return self.beta * self.cometric_.inverse_forward(q, p)
 
     def extra_repr(self) -> str:
         return f"beta={self.beta}"
@@ -346,6 +400,8 @@ class IdentityCoMetric(CoMetric):
 class SoftAbsCometric(CoMetric):
     def __init__(self, base_cometric: CoMetric, alpha: float = 1e3):
         super().__init__()
+        if base_cometric.is_diag:
+            raise NotImplementedError("SoftAbs for diagonal cometrics not implemented yet")
         self.base_cometric = base_cometric
         self.alpha = alpha
 
@@ -353,7 +409,7 @@ class SoftAbsCometric(CoMetric):
         g = self.base_cometric.metric(q)
         g_soft = SoftAbs(g, self.alpha)
         return g_soft
-    
+
     def forward(self, q):
         g_soft = self.metric_tensor(q)
         return torch.linalg.inv(g_soft)
@@ -380,10 +436,10 @@ class PointCarreCoMetric(CoMetric):
         scalar = 1 / (1 - norm_q_sqr) ** 2
         return 4 * scalar[:, None, None] * self.eye(q)
 
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        norm_q_sqr = torch.linalg.vector_norm(q, dim=1) ** 2
-        scalar = 1 / (1 - norm_q_sqr) ** 2
-        return 4 * scalar[:, None] * p
+    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
+    #     norm_q_sqr = torch.linalg.vector_norm(q, dim=1) ** 2
+    #     scalar = 1 / (1 - norm_q_sqr) ** 2
+    #     return 4 * scalar[:, None] * p
 
 
 ################################################################
@@ -417,7 +473,7 @@ class FunctionnalHeightMapCometric(CoMetric):
         dy = dy.sum(dim=1)
         return dx, dy
 
-    def metric(self, q):
+    def metric_tensor(self, q):
         x, y = q.T
         df_dx, df_dy = self.get_dx_dy(x, y)
 
@@ -572,7 +628,7 @@ class HeightMapCometric(CoMetric):
         g_inv_interp = self.get_metric_value_at(x, y, self.g_inv)
         return g_inv_interp
 
-    def metric(self, q):
+    def metric_tensor(self, q):
         """Compute the metric tensor at the given points
 
         Parameters
@@ -628,7 +684,7 @@ class DiffeoCometric(CoMetric):
             self.jacobian = torch.vmap(jacobian_, chunk_size=None)
 
     @torch.no_grad()
-    def metric(self, q: torch.Tensor):
+    def metric_tensor(self, q: torch.Tensor):
         jacobian = self.jacobian(q)
         g = jacobian.mT @ jacobian
         g = g + self.reg_coef * self.eye(q)
@@ -639,10 +695,10 @@ class DiffeoCometric(CoMetric):
         g = self.metric(q)
         return torch.linalg.inv(g)
 
-    @torch.no_grad()
-    def inverse_forward(self, q: torch.Tensor, p: torch.Tensor):
-        g = self.metric(q)
-        return torch.einsum("bij,bj->bi", g, p)
+    # @torch.no_grad()
+    # def inverse_forward(self, q: torch.Tensor, p: torch.Tensor):
+    #     g = self.metric(q)
+    #     return torch.einsum("bij,bj->bi", g, p)
 
     def extra_repr(self) -> str:
         return f"reg_coef={self.reg_coef}"
@@ -674,8 +730,8 @@ class LiftedCometric(CoMetric):
         grad_h_ = torch.func.jacrev(self.h)
         self.grad_h = lambda x: torch.einsum("bibj->bij", grad_h_(x))
 
-    def metric(self, q: torch.Tensor):
-        g_base = self.base_cometric.metric(q)
+    def metric_tensor(self, q: torch.Tensor):
+        g_base = self.base_cometric.metric_tensor(q)
         grad_h = self.grad_h(q)
         g_h = grad_h @ grad_h.mT
         g = g_base + self.beta * g_h
@@ -715,13 +771,13 @@ class FisherRaoCometric(CoMetric):
         else:
             self.hessian = hessian_
 
-    def metric(self, q: torch.Tensor):
+    def metric_tensor(self, q: torch.Tensor):
         g = -self.hessian(q)
         g += self.reg_coef * self.eye(q)
         return g
 
     def forward(self, q: torch.Tensor):
-        g = self.metric(q)
+        g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
 
@@ -772,6 +828,10 @@ class KernelCometric(CoMetric):
         adaptative_std: bool = True,
     ):
         super().__init__()
+        if base_cometric.is_diag:
+            raise NotImplementedError(
+                "KernelCometric not implemented for diagonals base_cometric"
+            )
         self.reg_coef = reg_coef
         self.base_cometric = base_cometric
         self.K = n_neighbors
@@ -913,6 +973,10 @@ class CovKernelCometric(CoMetric):
         n_neighbors: int = 128,
     ):
         super().__init__()
+        if base_cometric.is_diag:
+            raise NotImplementedError(
+                "KernelCometric not implemented for diagonals base_cometric"
+            )
         self.reg_coef = reg_coef
         self.base_cometric = base_cometric
         self.K = n_neighbors
@@ -1075,16 +1139,10 @@ class CentroidsCometric(CoMetric):
         metric_weight: bool = True,
     ):
         super().__init__()
+
         assert (centroids is not None and cometric_centroids is not None) or (
             centroids is None and cometric_centroids is None
         ), "Either both centroids and cometric_centroids should be provided or none."
-        if cometric_centroids is not None:
-            cometric_centroids = self.assess_cometric_tensor_symmetry(cometric_centroids)
-            ## We don't really need to enforce strict psd as we use
-            ## a regularization term to ensure numerical stability.
-            # assert self.assess_cometric_tensor_psd(
-            #     cometric_centroids
-            # ), "Cometric centroids should be positive semi-definite matrices."
 
         if centroids is not None:
             self.register_buffer("centroids", centroids)
@@ -1100,10 +1158,25 @@ class CentroidsCometric(CoMetric):
         else:
             self.K = K
 
+        if self.cometric_centroids is not None:
+            self.cometric_centroids: Tensor = self.assess_cometric_tensor_symmetry(
+                self.cometric_centroids
+            )
+            ## We don't really need to enforce strict psd as we use
+            ## a regularization term to ensure numerical stability.
+            # assert self.assess_cometric_tensor_psd(
+            #     cometric_centroids
+            # ), "Cometric centroids should be positive semi-definite matrices."
         self.metric_weight = metric_weight
 
     def assess_cometric_tensor_symmetry(self, cometric_centroids: Tensor) -> bool:
         """Check if the cometric tensor is symmetric positive semi-definite."""
+
+        # When diagonal cometric is used, cometric_centroids can be 2D
+        if cometric_centroids.ndim == 2:
+            self.is_diag = True
+            return cometric_centroids
+
         if cometric_centroids.ndim != 3 or cometric_centroids.size(
             1
         ) != cometric_centroids.size(2):
@@ -1117,11 +1190,15 @@ class CentroidsCometric(CoMetric):
 
     def assess_cometric_tensor_psd(self, cometric_centroids: Tensor) -> bool:
         """Check if the cometric tensor is positive semi-definite."""
-        try:
-            torch.linalg.cholesky(cometric_centroids)
-            return True
-        except RuntimeError:
-            return False
+        if not self.is_diag:
+            try:
+                torch.linalg.cholesky(cometric_centroids)
+                return True
+            except RuntimeError:
+                return False
+
+        else:
+            return torch.all(cometric_centroids > 0)
 
     def process_centroids(self, K: int):
         if K < self.centroids.shape[0] and K > 0:
@@ -1152,24 +1229,49 @@ class CentroidsCometric(CoMetric):
             self.register_buffer("centroids", state_dict["centroids"])
         if "cometric_centroids" in state_dict and not hasattr(self, "cometric_centroids"):
             self.register_buffer("cometric_centroids", state_dict["cometric_centroids"])
-
+            if self.cometric_centroids.ndim == 2:
+                self.is_diag = True
         return super().load_state_dict(state_dict, strict, assign)
 
     def forward(self, z: Tensor) -> Tensor:
-        dz = self.centroids.unsqueeze(0) - z.unsqueeze(1)  # (b,K,d)
+        # Expand the computation to save memory when latentdim >> 1
         if self.metric_weight:
-            dz = torch.einsum("bki,kij,bkj->bk", dz, self.cometric_centroids, dz)  # (b,K)
+            if self.is_diag:
+                z_term = torch.einsum("bd,kd,bd->bk", z, self.cometric_centroids, z)  # (b,k)
+                cross_term = torch.einsum(
+                    "bd,kd->bk", z, self.cometric_centroids * self.centroids
+                )  # (b,k)
+                c_term = torch.einsum(
+                    "kd,kd,kd->k", self.centroids, self.cometric_centroids, self.centroids
+                ).unsqueeze(
+                    0
+                )  # (1,k)
+            else:
+                z_term = torch.einsum("bj,kij,bi->bk", z, self.cometric_centroids, z)
+                cross_term = torch.einsum(
+                    "bj,kij->bk", z, self.cometric_centroids * self.centroids
+                )
+                c_term = torch.einsum(
+                    "kj,kij,ki->k", self.centroids, self.cometric_centroids, self.centroids
+                ).unsqueeze(0)
         else:
-            dz = torch.norm(dz, dim=-1)  # (m,b)
-        weights = (
-            torch.exp(-(dz**2) / (2 * self.temperature**2)).unsqueeze(-1).unsqueeze(-1)
-        )  # (m,b,1,1)
-        G_inv = self.cometric_centroids.unsqueeze(0) * weights  # (m,k,d,d)
-        G_inv = G_inv.sum(dim=1)  # (m,d,d)
-        G_inv = G_inv + self.reg_coef * self.eye(z)  # (m,d,d)
+            z_term = (torch.linalg.vector_norm(z) ** 2).unsqueeze(1)  # (b,1)
+            c_term = (torch.linalg.vector_norm(self.centroids) ** 2).unsqueeze(0)  # (1,k)
+            cross_term = torch.einsum("bd,kd->bk", z, self.centroids)  # (b,k)
+
+        dz = z_term + c_term - 2 * cross_term
+        weights = torch.exp(-(dz**2) / (2 * self.temperature**2))  # (b,K)
+        G_inv = self.cometric_centroids  # (k,d,d) | (k,d)
+        if not self.is_diag:
+            G_inv = torch.einsum("bk,kij->bij", weights, G_inv)
+        else:
+            G_inv = torch.einsum("bk,kd->bd", weights, G_inv)
+
+        G_inv = G_inv + self.reg_coef * self.eye(z)  # (b,d,d) | (b,d)
         return G_inv
 
 
+# @TODO : Adapt these to fit the base class interface
 #################################################################
 # Parametric cometrics
 #################################################################
@@ -1515,8 +1617,7 @@ class MatsumotoMetrics(FinslerMetric):
 
     def forward(self, x: Tensor, v: Tensor):
         """Compute F(x,v) = alpha**2 / (alpha - beta)"""
-        alpha = self.alpha_inv(x).inverse()
-        alpha = torch.einsum("bi,bij,bj->b", v, alpha, v).sqrt()  # norm of v w.r.t. alpha
+        alpha = self.alpha_inv.metric(x, v).sqrt()  # norm of v w.r.t. alpha
         beta = self.beta(x)
         return alpha**2 / (alpha - beta)  # Matsumoto metric formula
 
@@ -1613,35 +1714,28 @@ class RandersMetrics(FinslerMetric):
         F : torch.Tensor (b,)
             Randers metric at x in the direction of v
         """
-        x_norm = torch.einsum("bi,bij,bj->b", v, self.base_cometric(x).inverse(), v).sqrt()
-
+        x_norm = self.base_cometric.metric(x, v).sqrt()
         omega_x = self.omega(x)
         omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
 
         F = x_norm + self.beta * omega_x_v
         return F
 
-    def fund_tensor_analytic_(self, x: Tensor, v: Tensor):
-        alpha = self.base_cometric(x).inverse()
-        beta = self.beta * self.omega(v)
+    def fund_tensor_analytic_(self, z: Tensor, v: Tensor):
+        F = self.forward(z, v)
+        G = self.base_cometric.metric_tensor(z)
+        b = self.omega(z)
+        v_alpha = torch.einsum("bj,bij,bi->b", v, G, v).sqrt()
 
-        x_norm = torch.einsum("bi,bij,bj->b", v, alpha, v).sqrt()
-        omega_x_v = torch.einsum("bi,bi->b", beta, v)
-        F = x_norm + omega_x_v
-        F = F[:, None, None]  # Reshape to (b,1,1)
+        Av = G @ v[:, :, None]
 
-        alpha_tilde = torch.einsum("bij, bj-> bi", alpha, v)
-        v_norm = torch.einsum("bi,bij,bj->b", v, alpha, v).sqrt()[:, None, None] + 1e-8
+        rhs = 1 / v_alpha[:, None, None] * Av
+        rhs = rhs @ rhs.mT
 
-        alpha_alpha_t = torch.einsum("bi,bj->bij", alpha_tilde, alpha_tilde)
+        lhs = G - 1 / v_alpha[:, None, None] ** 2 * Av @ Av.mT
+        lhs = (F / v_alpha)[:, None, None] * lhs
 
-        lhs_term = F / v_norm * (alpha - 1 / v_norm**2 * alpha_alpha_t)
-
-        rhs_term = 1 / v_norm.squeeze(-1) * alpha_tilde + beta
-        rhs_term = torch.einsum("bi,bj->bij", rhs_term, rhs_term)
-
-        g = lhs_term + rhs_term
-
+        g = lhs + rhs
         return g
 
     def fundamental_tensor(self, x: Tensor, v: Tensor):
