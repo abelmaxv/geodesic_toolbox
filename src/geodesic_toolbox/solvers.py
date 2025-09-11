@@ -16,7 +16,7 @@ import networkx as nx
 from .cometric import CoMetric, IdentityCoMetric, FinslerMetric
 from .utils import (
     magnification_factor,
-    hamiltonian,
+    # hamiltonian,
     cosine_time_scaling_schedule,
     scale_lr_magnification,
     vec,
@@ -66,11 +66,13 @@ class GeodesicDistanceSolver(torch.nn.Module):
         # distances = torch.einsum("B d, B d -> B", segments, distances)  # (b*n,)
         # distances = rearrange(distances, "(b n) -> b n", b=traj_q.shape[0])
 
-        # This version is more memory efficient but slower
-        distances = torch.stack(
-            [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
-        )  # Forward per batch, could be slightly faster but whatever
-        distances = torch.einsum("bni,bni->bn", segments, distances)
+        # # This version is more memory efficient but slower
+        # distances = torch.stack(
+        #     [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
+        # )  # Forward per batch, could be slightly faster but whatever
+        # distances = torch.einsum("bni,bni->bn", segments, distances)
+        distances = [self.cometric.metric(m, seg) for m, seg in zip(midpoints, segments)]
+        distances = torch.stack(distances)
 
         # Add a ReLU to avoid negative distances due to numerical errors
         distances = distances.relu().sqrt().sum(dim=1)
@@ -178,6 +180,7 @@ class ShootingSolver(GeodesicDistanceSolver):
     def H(self, p: Tensor, q: Tensor) -> Tensor:
         """
         Computes the Hamiltonian at point q for momentum p.
+        H(p,q) = p^T G_inv(q) p
 
         Params:
         p : Tensor, (b,d) momentum
@@ -186,7 +189,7 @@ class ShootingSolver(GeodesicDistanceSolver):
         Output:
         res : Tensor, (b,) hamiltonian
         """
-        return hamiltonian(self.cometric(q), p)
+        return self.cometric.cometric(q, p)
 
     def euler_step(self, H: Callable, p: Tensor, q: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -626,6 +629,10 @@ class BVP_shooting(BVP_wrapper):
         self.get_dp_dq = torch.func.grad(
             lambda p, q: self.compute_hamiltonian(p, q).sum(), argnums=(0, 1)
         )
+        if cometric.is_diag:
+            raise NotImplementedError(
+                "BVP_shooting not implemented/tested for diagonal cometrics"
+            )
 
     def compute_hamiltonian(self, p: Tensor, q: Tensor) -> Tensor:
         """
@@ -638,7 +645,7 @@ class BVP_shooting(BVP_wrapper):
         Output:
         res : Tensor, (b,) hamiltonian
         """
-        return hamiltonian(self.cometric(q), p).float()
+        return self.cometric.cometric(q, p).float()
 
     def compute_derivative(
         self, q: np.ndarray, p: np.ndarray
@@ -759,6 +766,9 @@ class BVP_ode(BVP_wrapper):
     def __init__(self, cometric=CoMetric, T=100, dim=2, verbose=0):
         super().__init__(cometric=cometric, dim=dim, T=T, verbose=verbose)
 
+        if cometric.is_diag:
+            raise NotImplementedError("BVP_ode not implemented/tested for diagonal cometrics")
+
         if hasattr(self.cometric, "jacobian"):
             self.get_dVecM = lambda gamma: self.cometric.jacobian(gamma.squeeze(2))
         else:
@@ -768,7 +778,7 @@ class BVP_ode(BVP_wrapper):
         """
         Compute the derivative of the flatten metric tensor
         """
-        eval_VecM = lambda gamma: vec(self.cometric.metric(gamma.squeeze(2)))
+        eval_VecM = lambda gamma: vec(self.cometric.metric_tensor(gamma.squeeze(2)))
         jac_ = torch.func.jacrev(eval_VecM)
         dVecM = lambda gamma: torch.einsum("b D B d i -> b D d i", jac_(gamma))
         return dVecM
@@ -1103,7 +1113,7 @@ class SolverGraph(GeodesicDistanceSolver):
         S = torch.exp(-W / (2 * sigma**2))
         return S
 
-    def get_predecessors(self,W) -> torch.Tensor:
+    def get_predecessors(self, W) -> torch.Tensor:
         """Get the predecessors for the shortest path computation..."""
         print("Computing predecessors...")
         predecessors = shortest_path(
@@ -1129,9 +1139,9 @@ class SolverGraph(GeodesicDistanceSolver):
 
     #     Returns:
     #     np.ndarray: A 2D numpy array of shape (n, n) containing the predecessors.
-    #     """        
+    #     """
     #     G = nx.from_numpy_array(W.cpu().numpy())
-        
+
     #     if device.type == "cuda":
     #         with nx.config.backends.cugraph(n_jobs=4):
     #             paths = nx.all_pairs_dijkstra(G, weight="weight")
@@ -1146,7 +1156,6 @@ class SolverGraph(GeodesicDistanceSolver):
     #             if len(paths_ij) > 1:
     #                 pred[node_i, node_j] = paths_ij[-2]
     #     return torch.from_numpy(pred)
-
 
     def linear_interpolation(self, p_i, p_j, t):
         """
@@ -1241,7 +1250,7 @@ class SolverGraph(GeodesicDistanceSolver):
             closest_q1[b] = ind1[b, argmin_length]
         return closest_q0, closest_q1
 
-    def get_path_idx(self, start_idx: Tensor, end_idx: Tensor,max_path_length:int=2000):
+    def get_path_idx(self, start_idx: Tensor, end_idx: Tensor, max_path_length: int = 2000):
         """
         Given the start and end indices, retrieve the path in the graph.
 
@@ -1673,7 +1682,7 @@ class SolverGraphFinsler(torch.nn.Module):
 
                 curve_length = rearrange(curve_length, "(b k) -> b k", b=batch_idx.shape[0])
                 Weight_matrix[batch_idx.view(-1, 1), curr_idx] = curve_length
-        
+
         if not is_strongly_connected(DiGraph(Weight_matrix.cpu().numpy())):
             Weight_matrix = self.connect_graph(Weight_matrix)
         return Weight_matrix.to("cpu"), knn
@@ -2110,7 +2119,7 @@ class GEORCE(GeodesicDistanceSolver):
 
     def __init__(
         self,
-        cometric,
+        cometric: CoMetric,
         T=100,
         max_iter=200,
         tol=1e-6,
@@ -2120,6 +2129,9 @@ class GEORCE(GeodesicDistanceSolver):
         pbar: bool = False,
     ):
         super().__init__()
+        if cometric.is_diag:
+            raise NotImplementedError("GEORCE not implemented/tested for diagonal cometrics")
+
         self.cometric = cometric
         self.T = T
         self.max_iter = max_iter
@@ -2148,8 +2160,9 @@ class GEORCE(GeodesicDistanceSolver):
         """
         traj = torch.cat([z0[None, :], z_t, zT[None, :]], dim=0)  # (T+1, d)
         dx = traj[1:] - traj[:-1]  # (T, d)
-        G = self.cometric(traj[:-1]).inverse()  # (T, d, d)
-        energy = torch.einsum("ti,tij,tj->t", dx, G, dx)  # (T,)
+        energy = self.cometric.metric(traj[:-1], dx)
+        # G = self.cometric.metric_tensor(traj[:-1])  # (T, d, d)
+        # energy = torch.einsum("ti,tij,tj->t", dx, G, dx)  # (T,)
         return energy.sum()
 
     def grad_E(self, z_t, z0, zT):
@@ -2183,7 +2196,7 @@ class GEORCE(GeodesicDistanceSolver):
 
         v_t: Tensor (T-1, d)
             The gradient of the energy at each time step.
-        G_inv_t: Tensor (T, d, d)
+        G_inv_t: Tensor (T, d, d) | (T,d)
             The inverse of the cometric at each time step.
         diff: Tensor (d,)
             The difference between the end points zT and z0.
@@ -2194,12 +2207,18 @@ class GEORCE(GeodesicDistanceSolver):
             The optimal mu_t for the geodesic trajectory.
         """
         v_cumsum = torch.cumsum(v_t.flip(0), dim=0).flip(0)
-        G_inv_sum = torch.sum(G_inv_t, dim=0)  # (d, d)
-        rhs = torch.einsum("tij,tj->ti", G_inv_t[:-1], v_cumsum)
-        rhs = rhs.sum(dim=0) + 2.0 * diff
+        G_inv_sum = torch.sum(G_inv_t, dim=0)  # (d, d) | (d,)
+        if G_inv_sum.ndim == 2:
+            rhs = torch.einsum("tij,tj->ti", G_inv_t[:-1], v_cumsum)
+        else:
+            rhs = G_inv_t[:-1] * v_cumsum
+        rhs = rhs.sum(dim=0) + 2.0 * diff  # (d,)
 
         # Solve the linear system
-        mu_T = -torch.linalg.solve(G_inv_sum, rhs)  # (d,)
+        if G_inv_sum.ndim == 2:
+            mu_T = -torch.linalg.solve(G_inv_sum, rhs)  # (d,)
+        else:
+            mu_T = -rhs / G_inv_sum
         mu_t = torch.cat([mu_T[None, :] + v_cumsum, mu_T[None, :]], dim=0)  # (T, d)
         return mu_t  # (T, d)
 
@@ -2275,8 +2294,7 @@ class GEORCE(GeodesicDistanceSolver):
         """
         full_traj = torch.cat([x_0[None, :], x_t, x_T[None, :]], dim=0)  # (T+1, d)
         dx = full_traj[1:] - full_traj[:-1]  # (T, d)
-        G = self.cometric(full_traj[:-1]).inverse()
-        distance = torch.einsum("ti,tij,tj->t", dx, G, dx).abs().sqrt()  # (T,)
+        distance = self.cometric.metric(full_traj[:-1],dx).sqrt() # (T,)
         return distance.sum()
 
     def georce_solver(
@@ -2325,8 +2343,8 @@ class GEORCE(GeodesicDistanceSolver):
                 d,
             ), f"x_t_0 must have shape {(self.T - 1, d)=} got {x_t_0.shape=}. But sure to exclude x_0 and x_T."
 
-        G_inv_0 = self.cometric(x_0[None, :]).squeeze(0)
-        G_0 = G_inv_0.inverse()
+        G_inv_0 = self.cometric.cometric_tensor(x_0[None, :]).squeeze(0)
+        G_0 = self.cometric.metric_tensor(x_0[None, :]).squeeze(0)
 
         diff = x_T - x_0
 
@@ -2352,12 +2370,18 @@ class GEORCE(GeodesicDistanceSolver):
         # for i in pbar:
         while (norm_grad_E_t > self.tol) & (i < self.max_iter):
             # L5
-            G_inv_t = self.cometric(x_t_i)
-            G_inv_t = torch.cat([G_inv_0[None, :], G_inv_t], dim=0)  # (T, d, d)
-            G_t = G_inv_t.inverse()  # (T, d, d)
+            G_inv_t = self.cometric.cometric_tensor(x_t_i)
+            G_inv_t = torch.cat([G_inv_0[None, :], G_inv_t], dim=0)  # (T, d, d) | (T, d, d)
+            if G_inv_t.ndim==3:
+                G_t = G_inv_t.inverse()  # (T, d, d)
+            else:
+                G_t = 1/ G_inv_t # (T,d)
 
             # L6
-            v_t = torch.einsum("td, tji, ti -> tj", u_t_i[1:], G_t[1:], u_t_i[1:])  # (T-1, d)
+            if G_inv_t.ndim==3:
+                v_t = torch.einsum("tj, tji, ti -> tj", u_t_i[1:], G_t[1:], u_t_i[1:])  # (T-1, d)
+            else:
+                v_t = u_t_i[1:]* G_t[1:]* u_t_i[1:]  # (T-1, d)
             v_t = torch.autograd.grad(
                 v_t.sum(),
                 x_t_i,
@@ -2368,8 +2392,10 @@ class GEORCE(GeodesicDistanceSolver):
             mu_t = self.get_mut_t(v_t, G_inv_t, diff)  # (T, d)
 
             # L8
-            u_t = -0.5 * torch.einsum("tij,tj->ti", G_inv_t, mu_t)  # (T, d)
-
+            if G_inv_t.ndim==3:
+                u_t = -0.5 * torch.einsum("tij,tj->ti", G_inv_t, mu_t)  # (T, d)
+            else:
+                 u_t = -0.5 * G_inv_t* mu_t # (T, d)
             # L9/19
             alpha = self.line_search(x_0, x_T, u_t, u_t_i, x_t_i)
             # alpha = 0.1
