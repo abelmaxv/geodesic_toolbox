@@ -1249,7 +1249,7 @@ class CentroidsCometric(CoMetric):
             else:
                 z_term = torch.einsum("bj,kij,bi->bk", z, self.cometric_centroids, z)
                 cross_term = torch.einsum(
-                    "bj,kij->bk", z, self.cometric_centroids * self.centroids
+                    "bj,kij,ki->bk", z, self.cometric_centroids, self.centroids
                 )
                 c_term = torch.einsum(
                     "kj,kij,ki->k", self.centroids, self.cometric_centroids, self.centroids
