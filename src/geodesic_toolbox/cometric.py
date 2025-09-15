@@ -673,9 +673,11 @@ class DiffeoCometric(CoMetric):
         Regularization coefficient for the metric
     chunk_size: int
         Chunk size to use for computing the jacobian. Specifiy a value if running in memory issues.
+    vmap_ok : bool
+        If True, use vmap to compute the jacobian. Else, use a for loop.
     """
 
-    def __init__(self, diffeo: torch.nn.Module, reg_coef: float = 1e-3, chunk_size: int = 4):
+    def __init__(self, diffeo: torch.nn.Module, reg_coef: float = 1e-3, chunk_size: int = 4,vmap_ok:bool=True):
         super().__init__()
         self.diffeo = diffeo
         self.reg_coef = reg_coef
@@ -683,11 +685,36 @@ class DiffeoCometric(CoMetric):
 
         if hasattr(self.diffeo, "jacobian"):
             self.jacobian = self.diffeo.jacobian
+        elif vmap_ok:
+            no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
+            self.jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
+            # self.jacobian = torch.vmap(jacobian_,chunk_size=chunk_size)
+            self.jacobian = torch.vmap(self.jacobian_, chunk_size=None)
         else:
             no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
-            jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
-            # self.jacobian = torch.vmap(jacobian_,chunk_size=chunk_size)
-            self.jacobian = torch.vmap(jacobian_, chunk_size=None)
+            self.jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
+            self.jacobian = self.jacobian_loop
+
+    def jacobian_loop(self, x: torch.Tensor):
+        """
+        Computes the jacobian of the diffeomorphism at the points x using a for loop.
+
+        Parameters
+        ----------
+        x : torch.Tensor (B,d)
+            Batch of points where to compute the jacobian
+
+        Returns
+        -------
+        jacobian : torch.Tensor (B,d_out,d)
+            Batch of jacobians
+        """
+        jacobian = []
+        for i in range(x.shape[0]):
+            jac_i = torch.autograd.functional.jacobian(self.no_batch_forward, x[i])
+            jacobian.append(jac_i)
+        jacobian = torch.stack(jacobian,dim=0)
+        return jacobian
 
     @torch.no_grad()
     def metric_tensor(self, q: torch.Tensor):
@@ -698,7 +725,7 @@ class DiffeoCometric(CoMetric):
 
     @torch.no_grad()
     def forward(self, q: torch.Tensor):
-        g = self.metric(q)
+        g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
     # @torch.no_grad()
