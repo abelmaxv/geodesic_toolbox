@@ -2459,6 +2459,10 @@ class GEORCE(GeodesicDistanceSolver):
         trajectories = []
         B, d = x_0.shape
         assert x_1.shape == (B, d), f"Both tensors must have the same shape {(B, d)=}"
+        x_0.requires_grad_(True)
+        x_1.requires_grad_(True)
+        if x_t_0 is not None:
+            x_t_0.requires_grad_(True)
         for b in range(B):
             if x_t_0 is not None:
                 x_final, _, _, _, _ = self.georce_solver(x_0[b], x_1[b], x_t_0=x_t_0[b])
@@ -2490,6 +2494,10 @@ class GEORCE(GeodesicDistanceSolver):
         """
         B, d = x_0.shape
         assert x_T.shape == (B, d), f"Both tensors must have the same shape {(B, d)=}"
+        x_0.requires_grad_(True)
+        x_T.requires_grad_(True)
+        if x_t_0 is not None:
+            x_t_0.requires_grad_(True)
 
         dst = torch.zeros(B, device=x_0.device)
 
