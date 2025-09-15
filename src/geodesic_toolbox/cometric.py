@@ -381,14 +381,20 @@ class IdentityCoMetric(CoMetric):
     """
 
     def __init__(self, coscale: float = 1):
-        super().__init__()
+        super().__init__(is_diag=True)
         self.coscale = coscale
 
     def forward(self, q: Tensor) -> Tensor:
-        return self.coscale * self.eye(q)
+        return self.coscale * torch.ones_like(q)
 
-    def metric(self, q: Tensor) -> Tensor:
-        return 1 / self.coscale * self.eye(q)
+    def metric_tensor(self, q: Tensor) -> Tensor:
+        return 1 / self.coscale * torch.ones_like(q)
+
+    def metric(self, q: Tensor, p: Tensor) -> Tensor:
+        return 1 / self.coscale * torch.sum(p**2, dim=1)
+
+    def cometric(self, q, v):
+        return self.coscale * torch.sum(v**2, dim=1)
 
     def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
         return 1 / self.coscale * p
@@ -406,7 +412,7 @@ class SoftAbsCometric(CoMetric):
         self.alpha = alpha
 
     def metric_tensor(self, q):
-        g = self.base_cometric.metric(q)
+        g = self.base_cometric.metric_tensor(q)
         g_soft = SoftAbs(g, self.alpha)
         return g_soft
 
@@ -431,7 +437,7 @@ class PointCarreCoMetric(CoMetric):
         scalar = (1 - norm_q_sqr) ** 2
         return 1 / 4 * scalar[:, None, None] * self.eye(q)
 
-    def metric(self, q: Tensor) -> Tensor:
+    def metric_tensor(self, q: Tensor) -> Tensor:
         norm_q_sqr = torch.linalg.vector_norm(q, dim=1) ** 2
         scalar = 1 / (1 - norm_q_sqr) ** 2
         return 4 * scalar[:, None, None] * self.eye(q)
