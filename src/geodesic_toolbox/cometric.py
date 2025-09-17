@@ -677,7 +677,13 @@ class DiffeoCometric(CoMetric):
         If True, use vmap to compute the jacobian. Else, use a for loop.
     """
 
-    def __init__(self, diffeo: torch.nn.Module, reg_coef: float = 1e-3, chunk_size: int = 4,vmap_ok:bool=True):
+    def __init__(
+        self,
+        diffeo: torch.nn.Module,
+        reg_coef: float = 1e-3,
+        chunk_size: int = 4,
+        vmap_ok: bool = True,
+    ):
         super().__init__()
         self.diffeo = diffeo
         self.reg_coef = reg_coef
@@ -713,7 +719,7 @@ class DiffeoCometric(CoMetric):
         for i in range(x.shape[0]):
             jac_i = torch.autograd.functional.jacobian(self.no_batch_forward, x[i])
             jacobian.append(jac_i)
-        jacobian = torch.stack(jacobian,dim=0)
+        jacobian = torch.stack(jacobian, dim=0)
         return jacobian
 
     @torch.no_grad()
@@ -1619,7 +1625,7 @@ class FinslerMetric(nn.Module):
         """
 
         def g(x1, v2):
-            F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
+            F = lambda q, p: self.forward(q.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
             g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
             return g_hessian(v2)
 
@@ -1723,7 +1729,7 @@ class RandersMetrics(FinslerMetric):
         base_cometric: CoMetric,
         omega: nn.Module,
         beta: float = 1.0,
-        use_grad_g: bool = True,
+        use_grad_g: bool = False,
     ):
         super(RandersMetrics, self).__init__()
         self.base_cometric = base_cometric
@@ -1755,29 +1761,36 @@ class RandersMetrics(FinslerMetric):
         return F
 
     def fund_tensor_analytic_(self, z: Tensor, v: Tensor):
-        F = self.forward(z, v)
-        G = self.base_cometric.metric_tensor(z)
-        b = self.omega(z)
-        v_alpha = torch.einsum("bj,bij,bi->b", v, G, v).sqrt()
+        F_z_v = self.forward(z, v)
+        v_norm = self.base_cometric.metric(z, v).sqrt()
+        b = self.beta * self.omega(z)
+        a = self.base_cometric.metric_tensor(z)
+        if self.base_cometric.is_diag:
+            l_tilde = (a * v) / v_norm[:, None]
+        else:
+            l_tilde = torch.einsum("bij,bj->bi", a, v) / v_norm[:, None]
 
-        Av = G @ v[:, :, None]
+        l = l_tilde + b
+        ll_tilde = torch.einsum("bi,bj->bij", l_tilde, l_tilde)
+        ll = torch.einsum("bi,bj->bij", l, l)
 
-        rhs = 1 / v_alpha[:, None, None] * Av
-        rhs = rhs @ rhs.mT
+        if self.base_cometric.is_diag:
+            delta_term = -ll_tilde
+            diag_idx = torch.arange(0, a.shape[-1])
+            delta_term[:, diag_idx, diag_idx] += a
+        else:
+            delta_term = a - ll_tilde
 
-        lhs = G - 1 / v_alpha[:, None, None] ** 2 * Av @ Av.mT
-        lhs = (F / v_alpha)[:, None, None] * lhs
+        c = (F_z_v / v_norm)[:, None, None]
+        g = c * delta_term + ll
 
-        g = lhs + rhs
         return g
 
     def fundamental_tensor(self, x: Tensor, v: Tensor):
         """
         Computes the fundamental tensor of the Randers metric
         at the point x in the direction v.
-        g_ij(x,y) = d^2F^2(x,y)/(dy_i*dy_j)
-
-        I don't know why but this is not very consistent with the autograd results.
+        g_ij(x,y) =1/2 d^2F^2(x,y)/(dy_i*dy_j)
 
         Parameters:
         ----------
