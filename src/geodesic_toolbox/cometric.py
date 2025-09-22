@@ -1632,6 +1632,14 @@ class FinslerMetric(nn.Module):
         G = torch.vmap(g)
         return G(x, v)
 
+    def inverse_fundamental_tensor(self, x: Tensor, v: Tensor):
+        """
+        Compute the inverse of the fundamental tensor of the Finsler metric at point x in the direction v.
+        """
+        G = self.fundamental_tensor(x, v)
+        G_inv = torch.linalg.inv(G)
+        return G_inv
+
 
 class MatsumotoMetrics(FinslerMetric):
     """
@@ -1786,6 +1794,40 @@ class RandersMetrics(FinslerMetric):
 
         return g
 
+    # def inv_fund_tensor_analytic_(self, z: Tensor, v: Tensor):
+    #     F_z_v = self.forward(z, v)
+    #     alpha = self.base_cometric.metric(z, v).sqrt()
+    #     b = self.beta * self.omega(z)
+    #     b_norm = torch.linalg.vector_norm(b, dim=-1)
+    #     a = self.base_cometric.metric_tensor(z)
+    #     a_inv = self.base_cometric.cometric_tensor(z)
+    #     beta = torch.einsum("bi,bi->b", b, v)[:, None, None]
+    #     c = (F_z_v / alpha)[:, None, None]
+
+    #     if self.base_cometric.is_diag:
+    #         l_tilde = (a * v) / alpha[:, None]
+    #     else:
+    #         l_tilde = torch.einsum("bij,bj->bi", a, v) / alpha[:, None]
+
+    #     ll_tilde = torch.einsum("bi,bj->bij", l_tilde, l_tilde)
+    #     ltilde_b = torch.einsum("bi,bj->bij", l_tilde, b)
+
+    #     g_inv = (
+    #         c**2
+    #         * (beta + alpha * b_norm[:, None, None] ** 2)
+    #         / F_z_v[:, None, None]
+    #         * ll_tilde
+    #     )
+    #     g_inv -= c**2 * (ltilde_b + ltilde_b.mT)
+
+    #     if self.base_cometric.is_diag:
+    #         diag_idx = torch.arange(0, a.shape[-1])
+    #         g_inv[:, diag_idx, diag_idx] += c.squeeze((-1, -2)) * a_inv
+    #     else:
+    #         g_inv += c * a_inv
+
+    #     return g_inv
+
     def fundamental_tensor(self, x: Tensor, v: Tensor):
         """
         Computes the fundamental tensor of the Randers metric
@@ -1808,3 +1850,25 @@ class RandersMetrics(FinslerMetric):
             return super().fundamental_tensor(x, v)
         else:
             return self.fund_tensor_analytic_(x, v)
+
+    def inverse_fundamental_tensor(self, x: Tensor, v: Tensor):
+        """
+        Computes the inverse of the fundamental tensor of the Randers metric
+        at the point x in the direction v.
+        g^ij(x,y) = (g_ij(x,y))^-1
+
+        Parameters:
+        ----------
+        x : torch.Tensor (b,d)
+            Points in the manifold
+        v : torch.Tensor (b,d)
+            Tangent vectors at x
+
+        Returns:
+        -------
+        g_inv : torch.Tensor (b,d,d)
+            Inverse of the fundamental tensor of the Randers metric at x in the direction of v
+        """
+        return super().inverse_fundamental_tensor(x, v)
+        # else:
+        #     return self.inv_fund_tensor_analytic_(x, v)
