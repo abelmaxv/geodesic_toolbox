@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from .cometric import CoMetric
+from .cometric import CoMetric, RandersMetrics
 from einops import rearrange
 from math import ceil, exp, cos
 from tqdm import tqdm
@@ -396,3 +396,84 @@ def vec(M: Tensor) -> Tensor:
         (b, m*n)
     """
     return rearrange(M, "b m n -> b (m n)")
+
+
+def sample_pts(cometric, q0, N_pts, std=0.2):
+    """
+    Sample tangent vectors from the normal distribution N(0, G_inv(q0))
+
+    Parameters
+    ----------
+    cometric : CoMetric
+    q0 : torch.Tensor (d,)
+        Point at which to sample
+    N_pts : int
+        Number of points to sample
+    std : float
+        Standard deviation of the normal distribution
+
+    Returns
+    -------
+    v : torch.Tensor (N_pts, d)
+        Sampled points
+    """
+    G_inv = cometric.cometric_tensor(q0.unsqueeze(0)).squeeze(0)
+    if cometric.is_diag:
+        L = G_inv.sqrt()
+    else:
+        L = torch.linalg.cholesky(G_inv)
+    # Sample according to N(0, G_inv)
+    v = torch.randn((N_pts, 2)) * std
+    if cometric.is_diag:
+        v = v * L
+    else:
+        v = torch.einsum("ij,bj->bi", L, v)
+
+    return v
+
+
+def sample_cone(x_0: Tensor, randers: RandersMetrics, N_pts=1, theta: float = torch.pi / 4):
+    """
+    Sample a random vector in the cone defined by the angle theta around the direction w.
+    Uses rejection sampling from the hypersphere.
+
+    Parameters
+    ----------
+    x_0 : torch.Tensor (d,)
+        The point at which to sample the vector.
+    randers : RandersMetrics
+        The Randers metric defining the cone.
+    N_pts : int
+        The number of points to sample.
+    theta : float
+        The angle defining the cone. Must be in (0, pi).
+
+    Returns
+    -------
+    v : torch.Tensor (N_pts, d)
+        A random vector in the cone.
+    """
+    cos_theta = torch.cos(torch.tensor(theta, device=x_0.device))
+    d = x_0.shape[-1]
+    omega_x0 = randers.omega(x_0.unsqueeze(0)).squeeze(0)
+    G_inv = randers.base_cometric.cometric_tensor(x_0.unsqueeze(0)).squeeze(0)
+    if randers.base_cometric.is_diag:
+        L = G_inv.sqrt()
+    else:
+        L = torch.linalg.cholesky(G_inv)
+    w_normed = omega_x0 / torch.linalg.norm(omega_x0, dim=-1, keepdim=True)
+
+    v_list = []
+    for i in range(N_pts):
+        while True:
+            v = torch.randn(d, device=x_0.device)
+            if randers.base_cometric.is_diag:
+                v = L * v
+            else:
+                v = L @ v
+            v_normed = v / torch.linalg.norm(v)
+            if torch.dot(v_normed, -w_normed) >= cos_theta:
+                v_list.append(v)
+                break
+    v = torch.stack(v_list, dim=0)
+    return v
