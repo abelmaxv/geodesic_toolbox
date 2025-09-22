@@ -1794,39 +1794,40 @@ class RandersMetrics(FinslerMetric):
 
         return g
 
-    # def inv_fund_tensor_analytic_(self, z: Tensor, v: Tensor):
-    #     F_z_v = self.forward(z, v)
-    #     alpha = self.base_cometric.metric(z, v).sqrt()
-    #     b = self.beta * self.omega(z)
-    #     b_norm = torch.linalg.vector_norm(b, dim=-1)
-    #     a = self.base_cometric.metric_tensor(z)
-    #     a_inv = self.base_cometric.cometric_tensor(z)
-    #     beta = torch.einsum("bi,bi->b", b, v)[:, None, None]
-    #     c = (F_z_v / alpha)[:, None, None]
+    def inv_fund_tensor_analytic_(self, q: Tensor, v: Tensor):
+        """
+        Lemma 6.14 from 'Comparison Finsler Geometry' by Ohta
 
-    #     if self.base_cometric.is_diag:
-    #         l_tilde = (a * v) / alpha[:, None]
-    #     else:
-    #         l_tilde = torch.einsum("bij,bj->bi", a, v) / alpha[:, None]
+        It doesn't work, use autograd instead
+        """
+        a_inv = self.randers.base_cometric.cometric_tensor(q)
+        v_norm = self.randers.base_cometric.metric(q, v).sqrt()
+        F = self.randers(q, v)
 
-    #     ll_tilde = torch.einsum("bi,bj->bij", l_tilde, l_tilde)
-    #     ltilde_b = torch.einsum("bi,bj->bij", l_tilde, b)
+        b_form = self.randers.beta * self.randers.omega(q)  # Use b_form instead of b
+        beta = torch.einsum("bi,bi->b", b_form, v)
+        beta_norm_sqr = self.randers.base_cometric.metric(q, b_form)
 
-    #     g_inv = (
-    #         c**2
-    #         * (beta + alpha * b_norm[:, None, None] ** 2)
-    #         / F_z_v[:, None, None]
-    #         * ll_tilde
-    #     )
-    #     g_inv -= c**2 * (ltilde_b + ltilde_b.mT)
+        vv = torch.einsum("bi,bj->bij", v, v)
+        bv = torch.einsum("bi,bj->bij", b_form, v)  # Use b_form here
+        vb = torch.einsum("bi,bj->bij", v, b_form)  # Use b_form here
 
-    #     if self.base_cometric.is_diag:
-    #         diag_idx = torch.arange(0, a.shape[-1])
-    #         g_inv[:, diag_idx, diag_idx] += c.squeeze((-1, -2)) * a_inv
-    #     else:
-    #         g_inv += c * a_inv
+        batch_size, dim = b_form.shape[0], b_form.shape[1]  # Use different names
+        g_inv = torch.zeros(batch_size, dim, dim, dtype=q.dtype, device=q.device)
 
-    #     return g_inv
+        # First term
+        if self.randers.base_cometric.is_diag:
+            diag_idx = torch.arange(0, a_inv.shape[-1], device=a_inv.device)
+            g_inv[:, diag_idx, diag_idx] += (v_norm / F)[:, None] * a_inv
+        else:
+            g_inv += (v_norm / F)[:, None, None] * a_inv
+
+        # Second term
+        g_inv += ((beta + beta_norm_sqr * v_norm) / F**3)[:, None, None] * vv
+
+        # Third term
+        g_inv -= (v_norm / F**2)[:, None, None] * (bv + vb)
+        return g_inv
 
     def fundamental_tensor(self, x: Tensor, v: Tensor):
         """
