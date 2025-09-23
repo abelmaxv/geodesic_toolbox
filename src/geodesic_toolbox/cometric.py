@@ -1197,7 +1197,7 @@ class CentroidsCometric(CoMetric):
         else:
             self.K = K
 
-        if self.cometric_centroids is not None:
+        if cometric_centroids is not None:
             self.cometric_centroids: Tensor = self.assess_cometric_tensor_symmetry(
                 self.cometric_centroids
             )
