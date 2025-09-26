@@ -432,7 +432,9 @@ def sample_pts(cometric, q0, N_pts, std=0.2):
     return v
 
 
-def sample_cone(x_0: Tensor, randers: RandersMetrics, N_pts=1, theta: float = torch.pi / 4):
+def sample_cone(
+    x_0: Tensor, randers: RandersMetrics, N_pts=1, theta: float = torch.pi / 4, max_iter=1000
+) -> Tensor:
     """
     Sample a random vector in the cone defined by the angle theta around the direction w.
     Uses rejection sampling from the hypersphere.
@@ -461,19 +463,25 @@ def sample_cone(x_0: Tensor, randers: RandersMetrics, N_pts=1, theta: float = to
         L = G_inv.sqrt()
     else:
         L = torch.linalg.cholesky(G_inv)
-    w_normed = omega_x0 / torch.linalg.norm(omega_x0, dim=-1, keepdim=True)
 
-    v_list = []
-    for i in range(N_pts):
-        while True:
-            v = torch.randn(d, device=x_0.device)
-            if randers.base_cometric.is_diag:
-                v = L * v
-            else:
-                v = L @ v
-            v_normed = v / torch.linalg.norm(v)
-            if torch.dot(v_normed, -w_normed) >= cos_theta:
-                v_list.append(v)
-                break
-    v = torch.stack(v_list, dim=0)
+    v = torch.zeros((N_pts, d), device=x_0.device, dtype=x_0.dtype)
+    mask = torch.zeros(
+        N_pts, dtype=torch.bool, device=x_0.device
+    )  # 0 if not found, 1 if found
+    n_iter = 0
+    while mask.sum() < N_pts and n_iter < max_iter:
+        n_iter += 1
+        v_tmp = torch.randn((N_pts, d), device=x_0.device, dtype=x_0.dtype)
+        if randers.base_cometric.is_diag:
+            v_tmp = L * v_tmp
+        else:
+            v_tmp = torch.einsum("ij,bj->bi", L, v_tmp)
+        cosim = torch.nn.functional.cosine_similarity(v_tmp, -omega_x0, dim=-1)
+        mask_tmp = cosim >= cos_theta  # New points that are ok
+        v[mask_tmp & ~mask] = v_tmp[mask_tmp & ~mask]
+        mask = mask | mask_tmp
+    if n_iter == max_iter:
+        print(
+            f"Warning: max_iter reached when sampling cone with theta={theta}. Only {mask.sum().item()} points were sampled."
+        )
     return v
