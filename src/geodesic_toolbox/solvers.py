@@ -940,6 +940,9 @@ class SolverGraph(GeodesicDistanceSolver):
         The maximum number of data points to use for the graph. If None, all data points
         are used. If the number of data points is larger than this value, the graph is
         computed on a random subset of the data points to save memory.
+    smooth_curve : bool
+        If True, smooth the curve with a mean kernel before feeding it to the spline
+        when reparametrizing the trajectory.
     """
 
     def __init__(
@@ -950,6 +953,7 @@ class SolverGraph(GeodesicDistanceSolver):
         dt: float = 0.01,
         batch_size: int = 64,
         max_data_count: int | None = None,
+        smooth_curve: bool = True,
     ) -> None:
         super().__init__(cometric)
 
@@ -961,6 +965,7 @@ class SolverGraph(GeodesicDistanceSolver):
         self.dt = dt
         self.T = int(1 / self.dt)
         self.b_size = batch_size
+        self.smooth_curve = smooth_curve
 
         self.W, self.knn = self.init_knn_graph(data, n_neighbors, batch_size)
         self.predecessors = self.get_predecessors(self.W)
@@ -1343,7 +1348,7 @@ class SolverGraph(GeodesicDistanceSolver):
 
         pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1], device=q0.device)
         for b in range(q0.shape[0]):
-            pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b])
+            pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b],smooth_curve=self.smooth_curve)
 
         # pts_on_traj = self.get_pts_from_idx(start_idx, path_idx)
         pts_on_traj = torch.cat([q1[:, None, :], pts_on_traj, q0[:, None, :]], dim=1)
@@ -1601,6 +1606,9 @@ class SolverGraphFinsler(torch.nn.Module):
         The maximum number of data points to use for the graph. If None, all data points
         are used. If the number of data points is larger than this value, the graph is
         computed on a random subset of the data points to save memory.
+    smooth_curve : bool
+        If True, smooth the curve with a mean kernel before feeding it to the spline
+        when reparametrizing the trajectory.
     """
 
     def __init__(
@@ -1611,6 +1619,7 @@ class SolverGraphFinsler(torch.nn.Module):
         dt: float = 0.01,
         batch_size: int = 64,
         max_data_count: int | None = None,
+        smooth_curve: bool = True,
     ) -> None:
         super().__init__()
         self.finsler_metric = finsler_metric
@@ -1623,6 +1632,7 @@ class SolverGraphFinsler(torch.nn.Module):
         self.dt = dt
         self.T = int(1 / self.dt)
         self.b_size = batch_size
+        self.smooth_curve = smooth_curve
 
         self.W, self.knn = self.init_knn_graph(data, n_neighbors, batch_size)
         self.predecessors = self.get_predecessors()
@@ -2005,7 +2015,7 @@ class SolverGraphFinsler(torch.nn.Module):
 
         pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1], device=q0.device)
         for b in range(q0.shape[0]):
-            pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b])
+            pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b],smooth_curve=self.smooth_curve)
 
         # pts_on_traj = self.get_pts_from_idx(start_idx, path_idx)
         pts_on_traj = torch.cat([q1[:, None, :], pts_on_traj, q0[:, None, :]], dim=1)
@@ -3033,6 +3043,7 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
         alpha_0: float = 1.0,
         pbar_georce: bool = False,
         max_data_count: None | int = None,
+        smooth_curve: bool = True,
     ):
         super().__init__(cometric=cometric)
         dt = 1.0 / T
@@ -3043,6 +3054,7 @@ class SolverGraphGEORCE(GeodesicDistanceSolver):
             dt=dt,
             batch_size=batch_size,
             max_data_count=max_data_count,
+            smooth_curve=smooth_curve,
         )
         self.georce_solver = GEORCE(
             cometric=cometric,
@@ -3103,6 +3115,7 @@ class SolverGraphGEORCEFinsler(GEORCEFinsler):
         alpha_0: float = 1.0,
         pbar_georce: bool = False,
         max_data_count: None | int = None,
+        smooth_curve: bool = True,
     ):
         super().__init__(
             finsler=finsler,
@@ -3122,6 +3135,7 @@ class SolverGraphGEORCEFinsler(GEORCEFinsler):
             dt=dt,
             batch_size=batch_size,
             max_data_count=max_data_count,
+            smooth_curve=smooth_curve,
         )
 
     def get_trajectories(self, q0: Tensor, q1: Tensor) -> Tensor:
