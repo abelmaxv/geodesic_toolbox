@@ -1257,6 +1257,7 @@ class CentroidsCometric(CoMetric):
             print(
                 f"Warning: K={K} is greater than the number of centroids {self.centroids.shape[0]}. Using all centroids."
             )
+            self.K = self.centroids.shape[0]
         dst_mat = torch.cdist(self.centroids, self.centroids, p=2)
         dst_mat[dst_mat == 0] = float("inf")  # Avoid zero self distances
         min_distances, _ = dst_mat.min(dim=1)
@@ -1294,8 +1295,8 @@ class CentroidsCometric(CoMetric):
                     "kj,kij,ki->k", self.centroids, self.cometric_centroids, self.centroids
                 ).unsqueeze(0)
         else:
-            z_term = (torch.linalg.vector_norm(z) ** 2).unsqueeze(1)  # (b,1)
-            c_term = (torch.linalg.vector_norm(self.centroids) ** 2).unsqueeze(0)  # (1,k)
+            z_term = (torch.linalg.vector_norm(z,dim=-1) ** 2).unsqueeze(-1)  # (b,1)
+            c_term = (torch.linalg.vector_norm(self.centroids,dim=-1) ** 2).unsqueeze(0)  # (1,k)
             cross_term = torch.einsum("bd,kd->bk", z, self.centroids)  # (b,k)
 
         dz = z_term + c_term - 2 * cross_term
@@ -1308,6 +1309,9 @@ class CentroidsCometric(CoMetric):
 
         G_inv = G_inv + self.reg_coef * self.eye(z)  # (b,d,d) | (b,d)
         return G_inv
+
+    def extra_repr(self) -> str:
+        return f"K={self.K}, temperature={self.temperature:.3f}, reg_coef={self.reg_coef:.3f}, metric_weight={self.metric_weight}, is_diag={self.is_diag}"
 
 
 # @TODO : Adapt these to fit the base class interface
