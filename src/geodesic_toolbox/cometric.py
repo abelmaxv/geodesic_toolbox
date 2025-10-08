@@ -134,6 +134,36 @@ class CoMetric(torch.nn.Module):
         super().__init__()
         self.is_diag = is_diag
 
+    def inv_logdet(self, q: Tensor) -> Tensor:
+        """Computes log(det(G^-1(q))) for a batch of points q
+
+        Params:
+        q : Tensor (b,d) batch of points
+
+        Output:
+        res : Tensor (b,) log(det(G^-1(q)))
+        """
+        G_inv = self.cometric_tensor(q)
+        if not self.is_diag:
+            return torch.logdet(G_inv)
+        else:
+            return torch.sum(torch.log(G_inv), dim=1)
+
+    def logdet(self, q: Tensor) -> Tensor:
+        """Computes log(det(G(q))) for a batch of points q
+
+        Params:
+        q : Tensor (b,d) batch of points
+
+        Output:
+        res : Tensor (b,) log(det(G(q)))
+        """
+        G = self.metric_tensor(q)
+        if not self.is_diag:
+            return torch.logdet(G)
+        else:
+            return torch.sum(torch.log(G), dim=1)
+
     def cometric_tensor(self, q: Tensor) -> Tensor:
         """Computes G^-1(q) for a batch of points q
 
@@ -1295,8 +1325,10 @@ class CentroidsCometric(CoMetric):
                     "kj,kij,ki->k", self.centroids, self.cometric_centroids, self.centroids
                 ).unsqueeze(0)
         else:
-            z_term = (torch.linalg.vector_norm(z,dim=-1) ** 2).unsqueeze(-1)  # (b,1)
-            c_term = (torch.linalg.vector_norm(self.centroids,dim=-1) ** 2).unsqueeze(0)  # (1,k)
+            z_term = (torch.linalg.vector_norm(z, dim=-1) ** 2).unsqueeze(-1)  # (b,1)
+            c_term = (torch.linalg.vector_norm(self.centroids, dim=-1) ** 2).unsqueeze(
+                0
+            )  # (1,k)
             cross_term = torch.einsum("bd,kd->bk", z, self.centroids)  # (b,k)
 
         dz = z_term + c_term - 2 * cross_term
