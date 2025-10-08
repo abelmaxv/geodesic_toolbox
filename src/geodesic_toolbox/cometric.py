@@ -1240,7 +1240,7 @@ class CentroidsCometric(CoMetric):
             return torch.all(cometric_centroids > 0)
 
     def process_centroids(self, K: int):
-        if K < self.centroids.shape[0] and K > 0:
+        if K <= self.centroids.shape[0] and K > 0:
             self.K = K
             dst_mat = torch.cdist(self.centroids, self.centroids, p=2).sqrt().cpu().numpy()
             kmedoids_model = kmedoids.KMedoids(
