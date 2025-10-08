@@ -4,6 +4,7 @@ from .cometric import CoMetric, RandersMetrics
 from einops import rearrange
 from math import ceil, exp, cos
 from tqdm import tqdm
+import numpy as np
 
 
 def sample_hypersphere(batch_size: int, dim: int, radius: float = 0.95) -> torch.Tensor:
@@ -485,3 +486,129 @@ def sample_cone(
             f"Warning: max_iter reached when sampling cone with theta={theta}. Only {mask.sum().item()} points were sampled."
         )
     return v
+
+def sample_cone_VMF(x_0: Tensor, randers: RandersMetrics,kappa: float,alpha: float=1.0) -> Tensor:
+    """ 
+    Samples point from a VMF distribution centered around - omega(x_0) with concentration kappa.
+    Then flips the sample so that it is in the cone defined by -omega(x_0).
+    Finally samples are scaled to have norm alpha.
+
+    Parameters
+    ----------
+    x_0 : torch.Tensor (b,d)
+        The point at which to sample the vector.
+    randers : RandersMetrics
+        The Randers metric defining the cone.
+    kappa : float
+        The concentration parameter for the VMF distribution.
+    alpha : float
+        The norm of the sampled vector.
+
+    Returns
+    -------
+    v : torch.Tensor (b,d)
+        A random vector in the cone.
+    """
+    omega_x0 = randers.omega(x_0)
+    v = random_VMF(-omega_x0, kappa)
+    dot_prod = torch.einsum("bi,bi->b", v, -omega_x0)
+    mask = dot_prod < 0
+    v[mask] = -v[mask]
+    v = alpha * v/torch.linalg.norm(v, dim=-1, keepdim=True)
+    return v
+
+def random_VMF(mu, kappa, size=None):
+    """
+    Von Mises - Fisher distribution sampler with
+    mean direction mu and concentration kappa.
+    Source : https://hal.science/hal-040004568
+
+    Parameters
+    ----------
+    mu : torch.Tensor (b,d)
+        Mean direction.
+    kappa : float
+        Concentration parameter.
+    size : tuple, optional
+        Output shape. If None, returns a single sample per batch element.
+
+    Returns
+    -------
+    torch.Tensor (b, *size, d)
+        Samples from the Von Mises-Fisher distribution.
+    """
+    if mu.dim() == 1:
+        return _random_VMF(mu, kappa, size)
+    elif mu.dim() == 2:
+        out = []
+        for i in range(mu.shape[0]):
+            out.append(_random_VMF(mu[i], kappa, size))
+        return torch.stack(out, dim=0)
+    else:
+        raise ValueError("mu must be a 1D or 2D tensor.")
+
+
+def _random_VMF(mu, kappa, size=None):
+    """
+    Von Mises - Fisher distribution sampler with
+    mean direction mu and concentration kappa.
+    Source : https://hal.science/hal-040004568
+
+    Parameters
+    ----------
+    mu : torch.Tensor (d,)
+        Mean direction.
+    kappa : float
+        Concentration parameter.
+    size : tuple, optional
+        Output shape. If None, returns a single sample.
+
+    Returns
+    -------
+    torch.Tensor
+        Samples from the Von Mises-Fisher distribution.
+    """
+    # parse input parameters
+    if size is None:
+        n = 1
+        shape = ()
+    else:
+        size = torch.flatten(torch.tensor(size, dtype=torch.int64))
+        n = int(torch.prod(size).item())
+        shape = tuple(size.tolist())
+    mu = mu / torch.linalg.norm(mu)
+    d = mu.shape[0]
+    # z component: radial samples perpendicular to mu
+    z = torch.randn((n, d), device=mu.device, dtype=mu.dtype)
+    z = z / torch.linalg.norm(z, dim=1, keepdim=True)
+    z = z - (z @ mu[:, None]) * mu[None, :]
+    z = z / torch.linalg.norm(z, dim=1, keepdim=True)
+    # sample angles (in cos and sin form)
+    cos = _random_VMF_cos(d, kappa, n).to(device=mu.device, dtype=mu.dtype)
+    sin = torch.sqrt(1 - cos**2)
+    # combine angles with the z component
+    x = z * sin[:, None] + cos[:, None] * mu[None, :]
+    return x.reshape((*shape, d))
+
+
+
+def _random_VMF_cos(d: int, kappa: float, n: int):
+    """
+    Generate i.i.d. samples t with density function given by
+    p(t)=someConstant*(1-t**2)**((d-2)/2)*exp(kappa*t)
+    """
+    # b=Eq.4 of https://doi.org/10.1080/03610919408813161
+    b = (d - 1) / (2 * kappa + (4 * kappa**2 + (d - 1) ** 2) ** 0.5)
+    x0 = (1 - b) / (1 + b)
+    c = kappa * x0 + (d - 1) * np.log(1 - x0**2)
+    found = 0
+    out = []
+    while found < n:
+        m = min(n, int((n - found) * 1.5))
+        z = torch.distributions.Beta((d - 1) / 2, (d - 1) / 2).sample((m,))
+        t = (1 - (1 + b) * z) / (1 - (1 - b) * z)
+        test = kappa * t + (d - 1) * np.log(1 - x0 * t) - c
+        accept = test >= -torch.distributions.Exponential(1).sample((m,))
+        out.append(t[accept])
+        found += len(out[-1])
+    return torch.cat(out)[:n]
