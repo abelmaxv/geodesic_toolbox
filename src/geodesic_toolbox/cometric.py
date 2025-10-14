@@ -1206,6 +1206,7 @@ class CentroidsCometric(CoMetric):
         reg_coef: float = 1e-3,
         K: int = None,
         metric_weight: bool = True,
+        temperature_scale: float = 5.0,
     ):
         super().__init__()
 
@@ -1219,6 +1220,7 @@ class CentroidsCometric(CoMetric):
             self.register_buffer("cometric_centroids", cometric_centroids)
         self.register_buffer("temperature", torch.tensor(temperature))
         self.register_buffer("reg_coef", torch.tensor(reg_coef))
+        self.register_buffer("temperature_scale", torch.tensor(temperature_scale))
 
         if K is not None and centroids is not None:
             self.process_centroids(K)
@@ -1288,10 +1290,17 @@ class CentroidsCometric(CoMetric):
                 f"Warning: K={K} is greater than the number of centroids {self.centroids.shape[0]}. Using all centroids."
             )
             self.K = self.centroids.shape[0]
+        self.set_temperature()
+
+    def set_temperature(self):
         dst_mat = torch.cdist(self.centroids, self.centroids, p=2)
         dst_mat[dst_mat == 0] = float("inf")  # Avoid zero self distances
-        min_distances, _ = dst_mat.min(dim=1)
-        self.temperature = min_distances.max()
+        # min_distances, _ = dst_mat.min(dim=1)
+        # self.temperature = min_distances.max()
+        # Find distance to second closest centroid
+        sorted_distances, _ = torch.sort(dst_mat, dim=1)
+        second_min_distances = sorted_distances[:, 1]
+        self.temperature = self.temperature_scale * second_min_distances.max()
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         # Just to accomodate loading a state_dict with centroids and cometric_centroids
@@ -1343,7 +1352,7 @@ class CentroidsCometric(CoMetric):
         return G_inv
 
     def extra_repr(self) -> str:
-        return f"K={self.K}, temperature={self.temperature:.3f}, reg_coef={self.reg_coef:.3f}, metric_weight={self.metric_weight}, is_diag={self.is_diag}"
+        return f"K={self.K}, temperature={self.temperature:.3f}, temp_scale={self.temperature_scale} reg_coef={self.reg_coef:.3f}, metric_weight={self.metric_weight}, is_diag={self.is_diag}"
 
 
 # @TODO : Adapt these to fit the base class interface
