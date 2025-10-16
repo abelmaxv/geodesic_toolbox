@@ -261,19 +261,6 @@ class CoMetric(torch.nn.Module):
         """
         raise NotImplementedError
 
-    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-    #     """Computes G(q)@p for a batch of points q at momenta p
-
-    #     Params:
-    #     q : Tensor (b,d) batch of points
-    #     p : Tensor (b,d) batch of momenta
-
-    #     Output:
-    #     res : Tensor (b,d) G(q)@p
-    #     """
-    #     # return torch.linalg.solve_ex(self.forward(q), p)
-    #     return torch.linalg.solve(self.forward(q), p)
-
     def angle(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
         """
         Computes the angle between two vectors u and v at a point q.
@@ -332,7 +319,7 @@ class CoMetric(torch.nn.Module):
 
 class SumOfCometric(CoMetric):
     """
-    Sum of two cometrics. The metric is the sum of the two metrics.
+    Sum of two cometrics.
 
     Parameters
     ----------
@@ -357,50 +344,42 @@ class SumOfCometric(CoMetric):
     def forward(self, q: torch.Tensor):
         G_1 = self.cometric1.cometric_tensor(q)
         G_2 = self.cometric2.cometric_tensor(q)
-        if not self.cometric1.is_diag and not self.cometric2.is_diag:
+        if not self.cometric1.is_diag and self.cometric2.is_diag:
             G_2 = torch.diag_embed(G_2)
             return G_1 + G_2
-        elif not self.cometric1.is_diag and self.cometric2.is_diag:
+        elif self.cometric1.is_diag and not self.cometric2.is_diag:
             G_1 = torch.diag_embed(G_1)
             return G_1 + G_2
         return G_1 + G_2
-
-    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-    #     v_1 = self.cometric1.inverse_forward(q, p)
-    #     v_2 = self.cometric2.inverse_forward(q, p)
-    #     return v_1 + v_2
 
 
 class ScaledCometric(CoMetric):
     """
     Cometric that is a scaled version of another cometric.
-    The new metric is G'(q) = beta * G(q) where G(q) is the metric of the original cometric.
+    The new metric is G'(q) = 1/scale * G(q) where G(q) is the metric of the original cometric.
 
     Parameters
     ----------
     cometric : CoMetric
         The cometric to scale
-    beta : float
+    scale : float
         Scaling factor
     """
 
-    def __init__(self, cometric: CoMetric, beta: float):
+    def __init__(self, cometric: CoMetric, scale: float):
         super().__init__()
         self.cometric_ = cometric
-        self.beta = beta
+        self.scale = scale
         self.is_diag = cometric.is_diag
 
     def forward(self, q: Tensor) -> Tensor:
-        return 1 / self.beta * self.cometric_.forward(q)
+        return self.scale * self.cometric_.forward(q)
 
     def metric_tensor(self, q: Tensor) -> Tensor:
-        return self.beta * self.cometric_.metric_tensor(q)
-
-    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-    #     return self.beta * self.cometric_.inverse_forward(q, p)
+        return 1 / self.scale * self.cometric_.metric_tensor(q)
 
     def extra_repr(self) -> str:
-        return f"beta={self.beta}"
+        return f"scale={self.scale}"
 
 
 class IdentityCoMetric(CoMetric):
@@ -419,15 +398,6 @@ class IdentityCoMetric(CoMetric):
 
     def metric_tensor(self, q: Tensor) -> Tensor:
         return 1 / self.coscale * torch.ones_like(q)
-
-    def metric(self, q: Tensor, p: Tensor) -> Tensor:
-        return 1 / self.coscale * torch.sum(p**2, dim=1)
-
-    def cometric(self, q, v):
-        return self.coscale * torch.sum(v**2, dim=1)
-
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        return 1 / self.coscale * p
 
     def extra_repr(self) -> str:
         return f"coscale={self.coscale}"
@@ -471,11 +441,6 @@ class PointCarreCoMetric(CoMetric):
         norm_q_sqr = torch.linalg.vector_norm(q, dim=1) ** 2
         scalar = 1 / (1 - norm_q_sqr) ** 2
         return 4 * scalar[:, None, None] * self.eye(q)
-
-    # def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-    #     norm_q_sqr = torch.linalg.vector_norm(q, dim=1) ** 2
-    #     scalar = 1 / (1 - norm_q_sqr) ** 2
-    #     return 4 * scalar[:, None] * p
 
 
 ################################################################
@@ -853,329 +818,6 @@ class FisherRaoCometric(CoMetric):
 ################################################################
 # Interpolation cometrics
 ################################################################
-
-
-class KernelCometric(CoMetric):
-    """
-    Construct a smooth cometric tensor by the evaluation of the cometric at
-    given keypoints. ie:
-    G(q) = sum_{i=1}^K w_i(q) G(c_i) + reg_coef * Id
-    where G(c_i) is the cometric tensor at the keypoint c_i
-    and w_i(q) = exp(- lambda_i ||q-c_i||^2) is the weight of the keypoint c_i
-    and sigma is the bandwidth of the kernel.
-
-    THe keypoints can be computed using KMeans clustering on the input data.
-
-    Parameters
-    ----------
-    c : torch.Tensor (K,d)
-        The keypoints
-    base_cometric : CoMetric
-        The base cometric tensor. It will only be evaluated once at the keypoints.
-    a : float
-        The curvature parameter. It is used to compute the bandwidth of the kernel.
-    reg_coef : float
-        Regularization coefficient for the cometric
-    use_knn : bool
-        If True, the keypoints are computed using KMeans clustering on the input data.
-        Otherwise, the keypoints are the input data itself.
-    n_neighbors : int
-        The number of keypoints to compute. If use_knn is True, this is the number of clusters.
-        Otherwise, this is ignored.
-    adaptative_std: bool
-        If True, compute the bandwidth as intra cluster variance. Else Sigma = 1/a**2 * Id
-    """
-
-    def __init__(
-        self,
-        c: Tensor,
-        base_cometric: CoMetric,
-        a: float = 0.5,
-        reg_coef: float = 1e-3,
-        use_knn: bool = False,
-        n_neighbors: int = 128,
-        adaptative_std: bool = True,
-    ):
-        super().__init__()
-        if base_cometric.is_diag:
-            raise NotImplementedError(
-                "KernelCometric not implemented for diagonals base_cometric"
-            )
-        self.reg_coef = reg_coef
-        self.base_cometric = base_cometric
-        self.K = n_neighbors
-        self.a = a
-        self.dim = c.size(1)
-        self.sqrt_d = torch.sqrt(torch.tensor(self.dim, dtype=c.dtype))
-        self.adaptative_std = adaptative_std
-
-        self.register_buffer("c", torch.zeros(self.K, c.size(1)))
-        self.register_buffer("bandwidth", torch.ones(self.K))
-        self.register_buffer("g_inv_c", self.eye(c))
-        bandwdith, c = self.get_bandwidth_and_centers_(c.cpu(), use_knn)
-        self.check_bandwidth_and_centers_(bandwdith)
-        self.bandwidth = bandwdith
-        self.c = c
-
-        self.g_inv_c = self.base_cometric(self.c)  # (K,d,d)
-
-    def get_bandwidth_and_centers_(
-        self, embeds: Tensor, use_knn, min_per_cluster: int = 5
-    ) -> tuple[Tensor, Tensor]:
-
-        if not use_knn:
-            self.K = embeds.shape[0]
-            centers = embeds
-            bandwidth = 1 / 2 * torch.ones(self.K) / (self.a / self.sqrt_d) ** 2
-            return bandwidth, centers
-
-        kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
-        c = kmeans.cluster_centers_
-        labels = kmeans.labels_
-
-        # Filter the clusters
-        if self.K > 3:
-            unique, counts = np.unique(labels, return_counts=True)
-            mean_per_cluster, std = counts.mean(), counts.std()
-            # Keep only the cluster with enough samples
-            to_keep = unique[
-                (counts > mean_per_cluster - 2 * std) & (counts > min_per_cluster)
-            ]
-            c = c[to_keep]
-            self.K = c.shape[0]
-        # Remap labels to 0,K-1
-        mapping_dict = {i: j for i, j in zip(to_keep, range(self.K))}
-        labels = np.array([mapping_dict[i] if i in mapping_dict else -1 for i in labels])
-
-        if not self.adaptative_std:
-            # Constant bandwidth
-            bandwidth = 1 / 2 * torch.ones(self.K) / (self.a / self.sqrt_d) ** 2
-        else:
-            bandwidth = self.adjust_bandwidth(torch.from_numpy(c).to(torch.float32))
-
-        return bandwidth, torch.from_numpy(c).to(torch.float32)
-
-        # def adjust_bandwidth(self, embeds, c, labels):
-        #     """Compute the bandwidth as the covariance of the points in each cluster."""
-        #     bandwidth = torch.ones(self.K)
-        #     # Compute the average distances to the cluster centers per clusters
-        #     for k in range(self.K):
-        #         idx_in_cluster = labels == k
-        #         z_in_cluster = embeds[idx_in_cluster]
-        #         if z_in_cluster.shape[0] <= 1:
-        #             bandwidth[k] = 0.0
-        #             continue
-        #         dist = torch.linalg.vector_norm(z_in_cluster - c[k], dim=1)
-        #         sigma = (
-        #             (self.a / self.sqrt_d) * dist.mean() * 3.0
-        #         )  # scale by a factor to smooth the metric
-        #         lbd_k = 0.5 / sigma**2
-        #         bandwidth[k] = lbd_k
-        # return bandwidth
-
-    def adjust_bandwidth(self, c):
-        """Compute the bandwidth as the max distance between two closest clusters."""
-        bandwidth = torch.ones(self.K)
-        dst_mat = torch.cdist(c, c)  # (K,K)
-        # \rho = \max_i\min_{j\neq i} \lVert c_i-c_j\rVert_2
-        dst_mat[dst_mat == 0] = float("inf")
-        rho = dst_mat.min(dim=1).values.max()
-        rho = (self.a / self.sqrt_d) * rho
-        bandwidth = 1 / 2 * torch.ones(self.K) / rho**2
-        return bandwidth
-
-    def check_bandwidth_and_centers_(self, bandwidth: Tensor, cutoff=0.1) -> None:
-        zero_clusters = (bandwidth == 0.0).sum()
-        ratio_zero_clusters = zero_clusters / self.K
-        if ratio_zero_clusters > cutoff:
-            print(
-                f"WARNING: {ratio_zero_clusters:.2f}% ({zero_clusters}/{self.K}) of the clusters have no samples."
-            )
-            print("This might lead to numerical instability.")
-            print(
-                "Consider either increasing the curvature parameter `a` or decreasing the number of clusters `K`."
-            )
-
-    def forward(self, q):
-        weights = torch.cdist(q, self.c).pow(2)  # (B,K)
-        weights = torch.exp(-self.bandwidth * weights)
-        g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
-        g_inv += self.reg_coef * self.eye(q)
-        return g_inv
-
-
-class CovKernelCometric(CoMetric):
-    """
-    Construct a smooth cometric tensor by the evaluation of the cometric at
-    given keypoints. ie:
-    G(q)_inv = sum_{i=1}^K w_i(q) G_inv(c_i) + reg_coef * Id
-    where G_inv(c_i) is the cometric tensor at the keypoint c_i
-    and w_i(q) = exp(- 1/(2*rho**2) * (q-c_i)^T G_inv(c_i) (q-c_i))
-    and rho = a * sqrt{d} * max_i min_{j neq i} ||c_i-c_j||_2
-    The keypoints can be computed using KMeans clustering on the input data.
-
-    Parameters
-    ----------
-    c : torch.Tensor (K,d)
-        The keypoints
-    base_cometric : CoMetric
-        The base cometric tensor. It will only be evaluated once at the keypoints.
-    a : float
-        The curvature parameter. It is used to compute the bandwidth of the kernel.
-    reg_coef : float
-        Regularization coefficient for the cometric
-    use_knn : bool
-        If True, the keypoints are computed using KMeans clustering on the input data.
-        Otherwise, the keypoints are the input data itself.
-    n_neighbors : int
-        The number of keypoints to compute. If use_knn is True, this is the number of clusters.
-        Otherwise, this is ignored.
-    """
-
-    def __init__(
-        self,
-        c: Tensor,
-        base_cometric: CoMetric,
-        a: float = 1.0,
-        reg_coef: float = 1e-3,
-        use_knn: bool = False,
-        n_neighbors: int = 128,
-    ):
-        super().__init__()
-        if base_cometric.is_diag:
-            raise NotImplementedError(
-                "KernelCometric not implemented for diagonals base_cometric"
-            )
-        self.reg_coef = reg_coef
-        self.base_cometric = base_cometric
-        self.K = n_neighbors
-        self.a = a
-        self.dim = c.size(1)
-        self.sqrt_d = torch.sqrt(torch.tensor(self.dim, dtype=c.dtype))
-
-        self.register_buffer("c", torch.zeros(self.K, c.size(1)))
-        self.register_buffer("g_inv_c", self.eye(c))
-        c_ = self.get_centers(c.cpu(), use_knn)
-        self.c = c_.to(c.device)
-
-        self.rho = self.get_rho(c)
-        self.g_inv_c = self.get_g_inv_c(self.c)  # (K,d,d)
-
-    def get_centers(self, embeds: Tensor, use_knn, min_per_cluster: int = 5) -> Tensor:
-        """Compute the centers of the clusters using KMeans clustering.
-        If use_knn is False, the centers are the input data itself.
-        If use_knn is True, the centers are the cluster centers.
-
-        Parameters
-        ----------
-        embeds : torch.Tensor (N,d)
-            The input data
-        use_knn : bool
-            If True, the centers are computed using KMeans clustering.
-        min_per_cluster : int
-            The minimum number of samples per cluster. If the number of samples in a cluster is less than this,
-            the cluster is removed.
-
-        Output
-        ------
-        centers : torch.Tensor (K,d)
-            The centers of the clusters
-        """
-
-        if not use_knn:
-            self.K = embeds.shape[0]
-            centers = embeds
-            return centers
-
-        kmeans = KMeans(n_clusters=self.K, random_state=1312).fit(embeds)
-        c = kmeans.cluster_centers_
-        labels = kmeans.labels_
-
-        # Filter the clusters
-        if self.K > 3:
-            unique, counts = np.unique(labels, return_counts=True)
-            mean_per_cluster, std = counts.mean(), counts.std()
-            # Keep only the cluster with enough samples
-            to_keep = unique[
-                (counts > mean_per_cluster - 2 * std) & (counts > min_per_cluster)
-            ]
-            c = c[to_keep]
-            self.K = c.shape[0]
-            # Remap labels to 0,K-1
-            mapping_dict = {i: j for i, j in zip(to_keep, range(self.K))}
-            labels = np.array([mapping_dict[i] if i in mapping_dict else -1 for i in labels])
-
-        return torch.from_numpy(c).to(torch.float32)
-
-    def get_rho(self, c: Tensor) -> Tensor:
-        """Compute the bandwidth as the mean of the distance between two closest clusters.
-
-        Parameters
-        ----------
-        c : torch.Tensor (K,d)
-            The keypoints
-
-        Output
-        ------
-        rho : torch.Tensor (1)
-            The bandwidth of the kernel
-        """
-        dst_mat = torch.cdist(c, c)  # (K,K)
-        # \rho = \mean\min_{j\neq i} \lVert c_i-c_j\rVert_2
-        dst_mat[dst_mat == 0] = float("inf")
-        # rho = dst_mat.min(dim=1).values.max()
-        rho = dst_mat.min(dim=1).values.mean()
-        # rho = (self.a / self.sqrt_d) * rho
-        self.rho_base = rho
-        rho = self.a * rho
-        return rho
-
-    @torch.no_grad()
-    def get_g_inv_c(self, q: Tensor, max_b_size: int = 32):
-        """Compute the cometric tensor at the given points
-        Batches the computation to avoid out of memory errors.
-
-        Parameters
-        ----------
-        q : torch.Tensor (K,d)
-            Points to compute the cometric tensor at
-        max_b_size : int
-            Maximum batch size to use for the computation
-
-        Output
-        ------
-        g_inv_c : torch.Tensor (K,d,d)
-            Cometric tensor at the given points
-        """
-        g_inv_c = self.eye(q)
-        pbar = tqdm(range(0, self.K, max_b_size), desc="Computing g_inv_c", leave=False)
-        for i in pbar:
-            j = min(i + max_b_size, self.K)
-            g_inv_c[i:j] = self.base_cometric(self.c[i:j])
-        return g_inv_c
-
-    def forward(self, q: Tensor) -> Tensor:
-        """Compute the cometric tensor at the given points
-
-        Parameters
-        ----------
-        q : torch.Tensor (B,d)
-            Coordinates of the points to compute the cometric tensor at
-
-        Output
-        ------
-        g_inv_interp : torch.Tensor (B,d,d)
-            Cometric tensor at the given points
-        """
-        dx = q[:, None, :] - self.c[None, :, :]  # (B,K,d)
-        weights = torch.einsum("bki,kij,bkj->bk", dx, self.g_inv_c, dx)  # dx^T@G_inv@dx
-        weights = weights / self.rho**2
-        weights = torch.exp(-0.5 * weights)  # (B,K)
-        g_inv = torch.einsum("bk,kij->bij", weights, self.g_inv_c)
-        g_inv += self.reg_coef * self.eye(q)
-        return g_inv
-
-
 class CentroidsCometric(CoMetric):
     """Cometric based on the cometric computed on centroids.
     New cometric is computed as a gaussian interpolation of the cometric at the centroids.
