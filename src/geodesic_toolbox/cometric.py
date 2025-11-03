@@ -32,6 +32,7 @@ def empirical_cov_mat(x: Tensor, mu: Tensor = None, eps=1e-6):
     """
     if mu is None:
         mu = x.mean(dim=0)
+    mu = mu[None, :]
     cov = (x - mu).T @ (x - mu) / (x.shape[0] - 1)
     cov += eps * torch.eye(x.shape[1], device=x.device)
     return cov
@@ -58,7 +59,8 @@ def empirical_diag_cov_mat(x: Tensor, mu: Tensor = None, eps: float = 1e-6):
         The covariance matrix.
     """
     if mu is None:
-        mu = x.mean(1)
+        mu = x.mean(dim=0)
+    mu = mu[None, :]
     var = torch.linalg.vector_norm(x - mu, dim=1).mean()
     cov = (var + eps) * torch.eye(x.shape[1], device=x.device)
     return cov
@@ -389,15 +391,15 @@ class IdentityCoMetric(CoMetric):
     coscale : float, scaling factor for the cometric. Set to 1 for the identity cometric
     """
 
-    def __init__(self, coscale: float = 1):
-        super().__init__(is_diag=True)
+    def __init__(self, coscale: float = 1, is_diag=True):
+        super().__init__(is_diag=is_diag)
         self.coscale = coscale
 
     def forward(self, q: Tensor) -> Tensor:
-        return self.coscale * torch.ones_like(q)
+        return self.coscale * self.eye(q)
 
     def metric_tensor(self, q: Tensor) -> Tensor:
-        return 1 / self.coscale * torch.ones_like(q)
+        return 1 / self.coscale * self.eye(q)
 
     def extra_repr(self) -> str:
         return f"coscale={self.coscale}"
@@ -449,8 +451,8 @@ class PointCarreCoMetric(CoMetric):
 
 
 class FunctionnalHeightMapCometric(CoMetric):
-    """Construct a cometric tensor from a parametric height map function.
-    The cometric tensor is the inverse of the metric tensor, which make this implementation uber slow.
+    """
+    Construct a cometric tensor from a parametric height map function.
     The metric tensor is simply  g_ij = <d_i r, d_j r> for r=(x,y,f(x,y)) where f is the height map function.
     for i,j in {x,y,z}.
 
@@ -489,211 +491,59 @@ class FunctionnalHeightMapCometric(CoMetric):
         return g
 
     def forward(self, q):
-        g = self.metric(q)
+        g = self.metric_tensor(q)
         g_inv = torch.linalg.inv(g)
         return g_inv
 
 
-class HeightMapCometric(CoMetric):
-    """Construct a cometric tensor from a height map where its values are given on a grid of fixed size.
-    Outside the range of the grid, the identity matrix is returned.
-    The cometric tensor is interpolated using bilinear interpolation.
-
-    Parameters
-    ----------
-    x : torch.tensor(size)
-        x coordinates of the points
-    y : torch.tensor(size)
-        y coordinates of the points
-    z : torch.tensor(size,size)
-        height map z[i,j] = z(x[i],y[j])
-    reg : float
-        Regularization parameter for the cometric tensor.
-    """
-
-    def __init__(self, x, y, z, reg=1):
-        super().__init__()
-
-        self.x = x
-        self.y = y
-        self.z = z
-        self.size = x.shape[0]
-        self.lbd = reg
-
-        self.x_snd_max = sorted(x)[-2]  # to avoid index out of range
-        self.y_snd_max = sorted(y)[-2]
-
-        g, g_inv = self.construct_g_inv(z)
-        self.g = g
-        self.g_inv = g_inv
-
-    def construct_g_inv(self, z):
-        dx, dy = torch.gradient(z)
-
-        # r= [x,y,z(x,y)]
-        dr_dx = torch.zeros((self.size, self.size, 3))
-        dr_dx[:, :, 0] = torch.ones((self.size, self.size))
-        dr_dx[:, :, 1] = torch.zeros((self.size, self.size))
-        dr_dx[:, :, 2] = dx
-
-        dr_dy = torch.zeros((self.size, self.size, 3))
-        dr_dy[:, :, 0] = torch.zeros((self.size, self.size))
-        dr_dy[:, :, 1] = torch.ones((self.size, self.size))
-        dr_dy[:, :, 2] = dy
-
-        # g_ij = <dr_i,dr_j>
-        g = torch.zeros((self.size, self.size, 2, 2))
-        g[:, :, 0, 0] = torch.sum(dr_dx * dr_dx, axis=2)
-        g[:, :, 0, 1] = torch.sum(dr_dx * dr_dy, axis=2)
-        g[:, :, 1, 0] = torch.sum(dr_dy * dr_dx, axis=2)
-        g[:, :, 1, 1] = torch.sum(dr_dy * dr_dy, axis=2)
-
-        g += self.lbd * torch.eye(2)
-
-        g_inv = torch.inverse(g)
-
-        return g, g_inv
-
-    def bilinear_inter(self, x, y, func):
-        # Compute the indices of the closest points
-        x_idx = torch.argmin(torch.abs(self.x[:, None] - x), axis=0)
-        y_idx = torch.argmin(torch.abs(self.y[:, None] - y), axis=0)
-
-        # Compute the weights
-        x_weight = (self.x[x_idx + 1] - x) / (self.x[x_idx + 1] - self.x[x_idx])
-        y_weight = (self.y[y_idx + 1] - y) / (self.y[y_idx + 1] - self.y[y_idx])
-
-        # Interpolate the values (bilinear interpolation)
-        w_00 = (1 - x_weight) * (1 - y_weight)
-        w_01 = x_weight * (1 - y_weight)
-        w_10 = (1 - x_weight) * y_weight
-        w_11 = x_weight * y_weight
-
-        func_interp_in_range = w_00[:, None, None] * func[x_idx, y_idx]
-        func_interp_in_range += w_01[:, None, None] * func[x_idx + 1, y_idx]
-        func_interp_in_range += w_10[:, None, None] * func[x_idx, y_idx + 1]
-        func_interp_in_range += w_11[:, None, None] * func[x_idx + 1, y_idx + 1]
-        return func_interp_in_range
-
-    def get_metric_value_at(self, x, y, func):
-        """Interpolates the values in given the coordinates x and y.
-        If not in the range, the identity matrix is returned
-
-        Parameters
-        ----------
-        x : torch.Tensor (n)
-            x coordinates of the points to interpolate
-        y : torch.Tensor (n)
-            y coordinates of the points to interpolate
-        func : torch.Tensor (size,size)
-            values of the function to interpolate
-
-        Output
-        ------
-        func_interp : torch.Tensor (n,size,size)
-
-        """
-        in_range_x = (x >= self.x.min()) & (x <= self.x_snd_max)
-        in_range_y = (y >= self.y.min()) & (y <= self.y_snd_max)
-        in_range = in_range_x & in_range_y
-
-        func_interp = torch.zeros(x.shape[0], 2, 2, dtype=x.dtype)
-
-        if not torch.any(in_range):
-            func_interp[~in_range] = self.lbd * torch.eye(2, dtype=x.dtype)
-        else:
-            x = x[in_range]
-            y = y[in_range]
-            func_interp_in_range = self.bilinear_inter(x, y, func)
-            func_interp[in_range] = func_interp_in_range
-            func_interp[~in_range] = self.lbd * torch.eye(2, dtype=x.dtype)
-
-        return func_interp
-
-    def forward(self, q):
-        """Compute the cometric tensor at the given points
-
-        Parameters
-        ----------
-        q : torch.Tensor (n,2)
-            coordinates of the points to interpolate
-
-        Output
-        ------
-        g_inv_interp : torch.Tensor (n,2,2)
-            interpolated cometric tensor
-        """
-
-        x, y = q.T
-
-        g_inv_interp = self.get_metric_value_at(x, y, self.g_inv)
-        return g_inv_interp
-
-    def metric_tensor(self, q):
-        """Compute the metric tensor at the given points
-
-        Parameters
-        ----------
-        q : torch.Tensor (n,2)
-            coordinates of the points to interpolate
-
-        Output
-        ------
-        g_interp : torch.Tensor (n,2,2)
-            interpolated metric tensor
-        """
-
-        x, y = q.T
-
-        g_interp = self.get_metric_value_at(x, y, self.g)
-        return g_interp
-
-
 class DiffeoCometric(CoMetric):
     """
-    Class for the cometric inherited by a diffeomorphism between a manifold and the euclidean space.
-    If J_f is the jacobian of the diffeomorphism f, the metric is given by:
-    g(x) = J_f(x)^T @ Id @ J_f(x)
-    Thus, the cometric is just the inverse of the metric ; which makes this
-    implementation slow.
-
-    Warning : this cometric's outputs are not differentiable. This is a design choice to
-    avoid out of memory issues.
+    Class for the cometric inherited by a diffeomorphism between manifolds.
+    If J_f is the jacobian of the diffeomorphism f and G the base metric, the metric is given by:
+    g(x) = J_f(x)^T @ G(f(x)) @ J_f(x)
 
     Parameters
     ----------
     diffeo: torch.nn.Module
         Neural network model. It should have signature (B,d) -> (B,...) (ie flattened input)
+    base_cometric: CoMetric
+        The base cometric. Default to Euclidean cometric.
     reg_coef: float
         Regularization coefficient for the metric
     chunk_size: int
         Chunk size to use for computing the jacobian. Specifiy a value if running in memory issues.
     vmap_ok : bool
         If True, use vmap to compute the jacobian. Else, use a for loop.
+    use_id: bool
+        If True, G will always be the identity matrix. This is used to avoid
+        allocating large matrices when the base metric is Euclidean. Defaults to True.
     """
 
     def __init__(
         self,
         diffeo: torch.nn.Module,
+        base_cometric: CoMetric = IdentityCoMetric(is_diag=False),
         reg_coef: float = 1e-3,
         chunk_size: int = 4,
         vmap_ok: bool = True,
+        use_id: bool = True,
     ):
         super().__init__()
         self.diffeo = diffeo
         self.reg_coef = reg_coef
         self.chunk_size = chunk_size
+        self.base_cometric = base_cometric
+        self.use_id = use_id
 
         if hasattr(self.diffeo, "jacobian"):
             self.jacobian = self.diffeo.jacobian
         elif vmap_ok:
-            no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
-            self.jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
-            # self.jacobian = torch.vmap(jacobian_,chunk_size=chunk_size)
+            self.no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
+            self.jacobian_ = torch.func.jacrev(self.no_batch_forward, chunk_size=chunk_size)
             self.jacobian = torch.vmap(self.jacobian_, chunk_size=None)
         else:
-            no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
-            self.jacobian_ = torch.func.jacrev(no_batch_forward, chunk_size=chunk_size)
+            self.no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
+            self.jacobian_ = torch.func.jacrev(self.no_batch_forward, chunk_size=chunk_size)
             self.jacobian = self.jacobian_loop
 
     def jacobian_loop(self, x: torch.Tensor):
@@ -717,33 +567,31 @@ class DiffeoCometric(CoMetric):
         jacobian = torch.stack(jacobian, dim=0)
         return jacobian
 
-    @torch.no_grad()
     def metric_tensor(self, q: torch.Tensor):
         jacobian = self.jacobian(q)
-        g = jacobian.mT @ jacobian
+        if not self.use_id:
+            g_base = self.base_cometric.metric_tensor(self.diffeo(q))
+            g = jacobian.mT @ g_base @ jacobian
+        else:
+            g = jacobian.mT @ jacobian
         g = g + self.reg_coef * self.eye(q)
         return g
 
-    @torch.no_grad()
     def forward(self, q: torch.Tensor):
         g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
-    # @torch.no_grad()
-    # def inverse_forward(self, q: torch.Tensor, p: torch.Tensor):
-    #     g = self.metric(q)
-    #     return torch.einsum("bij,bj->bi", g, p)
-
     def extra_repr(self) -> str:
-        return f"reg_coef={self.reg_coef}"
+        return f"reg_coef={self.reg_coef}, chunk_size={self.chunk_size}"
 
 
 class LiftedCometric(CoMetric):
     """
     Assume an original manifold of metric g.
-    We add a function h to condition such that it diverges toward +inf for unwanted values.
-    Then we consider the lifted metric :
-    g_lifted = g + beta * grad(h) @ grad(h)^T
+    Let h be a function (eg.  1/classifier) that diverges on some regions of the manifold.
+    This cometric implements a new metric that penalizes movement in the direction of the gradient of h.
+    This will encourage geodesics to stay on the level sets of h. The metric is given by:
+    g'(x) = g(x) + beta * grad(h(x)) @ grad(h(x))^T
 
     Parameters
     ----------
@@ -761,53 +609,162 @@ class LiftedCometric(CoMetric):
         self.h = h
         self.beta = beta
 
-        grad_h_ = torch.func.jacrev(self.h)
-        self.grad_h = lambda x: torch.einsum("bibj->bij", grad_h_(x))
+        self.diffeo = DiffeoCometric(
+            diffeo=self.h,
+            reg_coef=0,
+        )
 
     def metric_tensor(self, q: torch.Tensor):
         g_base = self.base_cometric.metric_tensor(q)
-        grad_h = self.grad_h(q)
-        g_h = grad_h @ grad_h.mT
+        if self.base_cometric.is_diag:
+            g_base = torch.diag_embed(g_base)
+        g_h = self.diffeo.metric_tensor(q)
         g = g_base + self.beta * g_h
         return g
 
     def forward(self, q):
-        g = self.metric(q)
+        g = self.metric_tensor(q)
         return torch.linalg.inv(g)
+
+    def extra_repr(self) -> str:
+        return f"beta={self.beta}"
 
 
 class FisherRaoCometric(CoMetric):
     """
     Cometric based on the Fisher-Rao metric, ie the hessian of the log-likelihood function.
     The metric is given by:
-    g(x) = - H_f(x) + reg_coef * Id
+    g(x) = SoftAbs(-H_f(x)) + reg_coef * Id
     where H_f is the hessian of the log-likelihood function at x.
 
     Parameters
     ----------
     log_likelihood : callable
-        Log-likelihood function of signature (B,d) -> (B,)
+        Log-likelihood function of signature (X,theta)-> log_prob(X|theta)
+        Where X is of shape (B,d)
     reg_coef : float
         Regularization coefficient for the metric
     softabs_alpha : float
         Regularization parameter for the softabs function. If None, no regularization is applied.
+    data_sampler : callable
+        Function to sample data from p(X|theta).
+        It should have signature (N_pts:int,theta) -> Tensor (N_pts,d)
+        Where N_pts is the number of points to sample, and d is the dimension of the data.
+        If None, the sampling is done using a N(0,1) distribution.
+    N_pts : int
+        Number of points to sample for the empirical fisher information matrix.
     """
 
-    def __init__(self, log_likelihood: callable, reg_coef: float = 1e-3, softabs_alpha=None):
+    def __init__(
+        self,
+        log_likelihood: callable,
+        reg_coef: float = 1e-3,
+        softabs_alpha=None,
+        data_sampler=None,
+        N_pts: int = 1000,
+    ):
         super().__init__()
+        self.N_pts = N_pts
         self.log_likelihood = log_likelihood
         self.reg_coef = reg_coef
-
-        hessian__ = torch.func.hessian(self.log_likelihood)
-        hessian_ = lambda q: torch.einsum("Bbibj->Bij", hessian__(q))
-        if softabs_alpha is not None:
-            self.hessian = lambda x: SoftAbs(hessian_(x), alpha=softabs_alpha)
+        self.softabs_alpha = softabs_alpha
+        if data_sampler is not None:
+            self.data_sampler = data_sampler
         else:
-            self.hessian = hessian_
+            self.data_sampler = self.normal_sampling
 
-    def metric_tensor(self, q: torch.Tensor):
-        g = -self.hessian(q)
-        g += self.reg_coef * self.eye(q)
+    def log_no_batch(self, x, theta):
+        """
+        Log-likelihood function without batch dimension.
+
+        Parameters
+        ----------
+        x : torch.Tensor (d,)
+            Data point
+        theta : torch.Tensor (p,)
+            Parameter of the distribution
+        """
+        return self.log_likelihood(x.unsqueeze(0), theta).squeeze(0)
+
+    def hessian_no_batch_all(self, x: torch.Tensor, theta: torch.Tensor):
+        """
+        Computes the hessian of the log-likelihood function at a single data point x.
+
+        Parameters
+        ----------
+        x : torch.Tensor (d,)
+            Data point
+        theta : torch.Tensor (p,)
+            Parameter of the distribution
+
+        Returns
+        -------
+        hess : torch.Tensor (p,p)
+            Hessian of the log-likelihood function at x
+        """
+        hess = torch.func.hessian(self.log_no_batch, argnums=1)(x, theta)
+        return hess
+
+    def hessian_no_batch_param(self, x: torch.Tensor, theta):
+        """
+        Computes the hessian of the log-likelihood function at a batch of data points x.
+
+        Parameters
+        ----------
+        x : torch.Tensor (B,d)
+            Batch of data points
+        theta : torch.Tensor (p,)
+            Parameter of the distribution
+
+        Returns
+        -------
+        hess : torch.Tensor (B,p,p)
+            Batch of Hessians of the log-likelihood function at x
+        """
+        B, d = x.shape
+        hess = []
+        for i in range(B):
+            hess_i = self.hessian_no_batch_all(x[i], theta)
+            hess.append(hess_i)
+        hess = torch.stack(hess, dim=0)
+        return hess
+
+    def normal_sampling(self, N_pts: int, theta: torch.Tensor):
+        d = theta.shape[1]
+        return torch.randn(N_pts, d, device=theta.device, dtype=theta.dtype)
+
+    def inf_matrix(self, theta):
+        """
+        Computes the empirical fisher information matrix at theta.
+        Uses a Monte Carlo estimate with N_pts samples.
+
+        inf_mat = -E_x [ H_f(x,theta) ]
+
+        Parameters
+        ----------
+        theta : torch.Tensor (B,p)
+            Batch of parameters of the distribution
+
+        Returns
+        -------
+        fim : torch.Tensor (B,p,p)
+            Batch of empirical fisher information matrices at theta
+        """
+        x = self.data_sampler(self.N_pts, theta)
+        B, p = theta.shape
+        hess = []
+        for i in range(B):
+            hess_i = self.hessian_no_batch_param(x, theta[i])
+            hess.append(hess_i)
+        hess = torch.stack(hess, dim=0)  # (B,N_pts,p,p)
+        fim = -hess.mean(dim=1)  # (B,p,p)
+        return fim
+
+    def metric_tensor(self, theta: torch.Tensor):
+        g = self.inf_matrix(theta)
+        if self.softabs_alpha is not None:
+            g = SoftAbs(g, alpha=self.softabs_alpha)
+        g += self.reg_coef * self.eye(theta)
         return g
 
     def forward(self, q: torch.Tensor):
@@ -875,43 +832,34 @@ class CentroidsCometric(CoMetric):
             self.cometric_centroids: Tensor = self.assess_cometric_tensor_symmetry(
                 self.cometric_centroids
             )
-            ## We don't really need to enforce strict psd as we use
-            ## a regularization term to ensure numerical stability.
-            # assert self.assess_cometric_tensor_psd(
-            #     cometric_centroids
-            # ), "Cometric centroids should be positive semi-definite matrices."
         self.metric_weight = metric_weight
 
     def assess_cometric_tensor_symmetry(self, cometric_centroids: Tensor) -> bool:
         """Check if the cometric tensor is symmetric positive semi-definite."""
+        assert cometric_centroids.ndim in [
+            2,
+            3,
+        ], f"Cometric centroids should be of shape (K,d) or (K,d,d), got {cometric_centroids.shape}"
+        assert (
+            cometric_centroids.shape[1] == self.centroids.shape[1]
+        ), f"Cometric centroids should have the same shape as centroids ({self.centroids.shape}), got {cometric_centroids.shape}"
 
         # When diagonal cometric is used, cometric_centroids can be 2D
         if cometric_centroids.ndim == 2:
             self.is_diag = True
             return cometric_centroids
+        else:
+            assert (
+                cometric_centroids.shape[1] == cometric_centroids.shape[2]
+            ), f"Cometric centroids should be square matrices, got {cometric_centroids.shape}"
 
-        if cometric_centroids.ndim != 3 or cometric_centroids.size(
-            1
-        ) != cometric_centroids.size(2):
-            raise ValueError(
-                f"Cometric centroids should be of shape (K,d,d), got {cometric_centroids.shape}"
-            )
         if not torch.allclose(cometric_centroids, cometric_centroids.mT):
             # Make it symmetric
+            print(
+                "Warning: Cometric centroids are not symmetric. Making them symmetric by using (A+A^T)/2."
+            )
             cometric_centroids = (cometric_centroids + cometric_centroids.mT) / 2
         return cometric_centroids
-
-    def assess_cometric_tensor_psd(self, cometric_centroids: Tensor) -> bool:
-        """Check if the cometric tensor is positive semi-definite."""
-        if not self.is_diag:
-            try:
-                torch.linalg.cholesky(cometric_centroids)
-                return True
-            except RuntimeError:
-                return False
-
-        else:
-            return torch.all(cometric_centroids > 0)
 
     def process_centroids(self, K: int):
         if K <= self.centroids.shape[0] and K > 0:
@@ -997,12 +945,9 @@ class CentroidsCometric(CoMetric):
         return f"K={self.K}, temperature={self.temperature:.3f}, temp_scale={self.temperature_scale} reg_coef={self.reg_coef:.3f}, metric_weight={self.metric_weight}, is_diag={self.is_diag}"
 
 
-# @TODO : Adapt these to fit the base class interface
 #################################################################
 # Parametric cometrics
 #################################################################
-
-
 class DiagonalCometricModel(CoMetric):
     """
     Parametric diagonal cometric model. All diagonal values can either be different or the same depending on
@@ -1017,7 +962,7 @@ class DiagonalCometricModel(CoMetric):
     """
 
     def __init__(self, in_dim, hidden_dim, latent_dim, lbd=1):
-        super().__init__()
+        super().__init__(is_diag=True)
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
@@ -1030,6 +975,7 @@ class DiagonalCometricModel(CoMetric):
             nn.Tanh(),
             nn.Linear(self.hidden_dim, self.latent_dim),
         )
+        self.initialize_weights()
 
     def initialize_weights(self):
         """Initialize the weights of the model to output the euclidean distance"""
@@ -1041,22 +987,16 @@ class DiagonalCometricModel(CoMetric):
         nn.init.zeros_(self.layers[-1].weight)
         nn.init.zeros_(self.layers[-1].bias)
 
-    def forward(self, features):
-        diag_val = self.layers(features)
+    def forward(self, x: Tensor) -> Tensor:
+        diag_val = self.layers(x)
         diag_val = torch.exp(diag_val)
-        G_inv = (diag_val[:, :, None] + self.lbd) * self.eye(features)
+        G_inv = (diag_val + self.lbd) * self.eye(diag_val)
         return G_inv
 
-    def metric(self, q: Tensor) -> Tensor:
+    def metric_tensor(self, q: Tensor) -> Tensor:
         diag_val = self.layers(q)
         diag_val = torch.exp(diag_val)
-        return (1 / diag_val[:, None] + 1 / self.lbd) * self.eye(q)
-
-    def inverse_forward(self, q: Tensor, p: Tensor) -> Tensor:
-        diag_val = self.layers(q)
-        diag_val = torch.exp(diag_val)
-        diag_val = 1 / diag_val + 1 / self.lbd
-        return diag_val[:, None] * p
+        return (1 / diag_val + 1 / self.lbd) * self.eye(diag_val)
 
     def extra_repr(self) -> str:
         return f"in_dim={self.in_dim}, hidden_dim={self.hidden_dim}, latent_dim={self.latent_dim}, lbd={self.lbd}"
@@ -1262,36 +1202,6 @@ class Cometric_MLP(CoMetric):
 #################################################################
 # Randers metrics
 #################################################################
-
-
-class ToyFinslerMetric(nn.Module):
-    """
-    This is a valid metric see:
-    https://doi.org/10.1016/j.aim.2005.06.007
-    """
-
-    def __init__(self, lbd: float = 1):
-        super().__init__()
-        self.lbd = lbd
-        self.lbd2 = lbd**2
-
-    def forward(self, x: Tensor, v: Tensor):
-        x_norm = torch.linalg.vector_norm(x, dim=-1)
-        v_norm = torch.linalg.vector_norm(v, dim=-1)
-        xv = torch.einsum("bi,bi->b", x, v)
-        F = 1 / (v_norm + 1e-8) * (1 + self.lbb2 * x_norm**2 + self.lbd2 * xv**2)
-        return F
-
-    def fundamental_tensor(self, x: Tensor, v: Tensor):
-        def g(x1, v2):
-            F = lambda p, q: self.forward(p.unsqueeze(0), q.unsqueeze(0)).squeeze(0)
-            g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
-            return g_hessian(v2)
-
-        G = torch.vmap(g)
-        return G(x, v)
-
-
 class FinslerMetric(nn.Module):
     """
     Finsler metric base class
@@ -1328,6 +1238,25 @@ class FinslerMetric(nn.Module):
         return G_inv
 
 
+class ToyFinslerMetric(FinslerMetric):
+    """
+    This is a valid metric see:
+    https://doi.org/10.1016/j.aim.2005.06.007
+    """
+
+    def __init__(self, lbd: float = 1):
+        super().__init__()
+        self.lbd = lbd
+        self.lbd2 = lbd**2
+
+    def forward(self, x: Tensor, v: Tensor):
+        x_norm = torch.linalg.vector_norm(x, dim=-1)
+        v_norm = torch.linalg.vector_norm(v, dim=-1)
+        xv = torch.einsum("bi,bi->b", x, v)
+        F = 1 / (v_norm + 1e-8) * (1 + self.lbd2 * x_norm**2 + self.lbd2 * xv**2)
+        return F
+
+
 class MatsumotoMetrics(FinslerMetric):
     """
     Matsumoto metrics with a fixed base metric and a variable 1-form.
@@ -1340,19 +1269,18 @@ class MatsumotoMetrics(FinslerMetric):
     alpha_inv : CoMetric
         Base cometric to use for the Matsumoto metric.
     beta : nn.Module
-        1-form to use for the Matsumoto metric. It should be a function that takes
-        in points on the manifold and outputs a vector of the same size as the points.
+        1-form to use for the Matsumoto metric.
     """
 
     def __init__(self, alpha_inv: CoMetric, beta: nn.Module):
-        super(self).__init__()
+        super().__init__()
         self.alpha_inv = alpha_inv
         self.beta = beta
 
     def forward(self, x: Tensor, v: Tensor):
         """Compute F(x,v) = alpha**2 / (alpha - beta)"""
         alpha = self.alpha_inv.metric(x, v).sqrt()  # norm of v w.r.t. alpha
-        beta = self.beta(x)
+        beta = self.beta(x, v)
         return alpha**2 / (alpha - beta)  # Matsumoto metric formula
 
 
@@ -1487,13 +1415,13 @@ class RandersMetrics(FinslerMetric):
 
         It doesn't work, use autograd instead
         """
-        a_inv = self.randers.base_cometric.cometric_tensor(q)
-        v_norm = self.randers.base_cometric.metric(q, v).sqrt()
-        F = self.randers(q, v)
+        a_inv = self.base_cometric.cometric_tensor(q)
+        v_norm = self.base_cometric.metric(q, v).sqrt()
+        F = self.forward(q, v)
 
-        b_form = self.randers.beta * self.randers.omega(q)  # Use b_form instead of b
+        b_form = self.beta * self.omega(q)  # Use b_form instead of b
         beta = torch.einsum("bi,bi->b", b_form, v)
-        beta_norm_sqr = self.randers.base_cometric.metric(q, b_form)
+        beta_norm_sqr = self.base_cometric.metric(q, b_form)
 
         vv = torch.einsum("bi,bj->bij", v, v)
         bv = torch.einsum("bi,bj->bij", b_form, v)  # Use b_form here
@@ -1503,7 +1431,7 @@ class RandersMetrics(FinslerMetric):
         g_inv = torch.zeros(batch_size, dim, dim, dtype=q.dtype, device=q.device)
 
         # First term
-        if self.randers.base_cometric.is_diag:
+        if self.base_cometric.is_diag:
             diag_idx = torch.arange(0, a_inv.shape[-1], device=a_inv.device)
             g_inv[:, diag_idx, diag_idx] += (v_norm / F)[:, None] * a_inv
         else:
