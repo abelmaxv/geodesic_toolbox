@@ -992,7 +992,7 @@ class SolverGraph(GeodesicDistanceSolver):
         print("Fitting KNN graph...")
         knn = NearestNeighbors(n_neighbors=n_neighbors + 1, algorithm="ball_tree", n_jobs=-1)
         knn.fit(data.cpu())
-        t = torch.arange(0, 1, self.dt, device=data.device).view(1, 1, -1, 1)
+        t = torch.arange(0, 1, self.dt, device=data.device, dtype=data.dtype).view(1, 1, -1, 1)
 
         # Find the Euclidean kNN
         N_data = data.shape[0]
@@ -1217,16 +1217,18 @@ class SolverGraph(GeodesicDistanceSolver):
         ind1 = ind1[:, :-1]
 
         q0_neighbors = torch.zeros(
-            B, self.n_neighbors, self.data.shape[1], device=q0.device
+            B, self.n_neighbors, self.data.shape[1], device=q0.device, dtype=q0.dtype
         )  # (B,K,D)
-        q1_neighbors = torch.zeros(B, self.n_neighbors, self.data.shape[1], device=q0.device)
+        q1_neighbors = torch.zeros(
+            B, self.n_neighbors, self.data.shape[1], device=q0.device, dtype=q0.dtype
+        )
 
         for n in range(self.n_neighbors):
             q0_neighbors[:, n, :] = self.data[ind0[:, n]]
             q1_neighbors[:, n, :] = self.data[ind1[:, n]]
 
         # Find the points with the closest metric distance to q0 and q1
-        t = torch.arange(0, 1, self.dt, device=q0.device)
+        t = torch.arange(0, 1, self.dt, device=q0.device, dtype=q0.dtype)  # (n_pts,)
 
         closest_q0 = torch.zeros(B).int()
         closest_q1 = torch.zeros(B).int()
@@ -1341,7 +1343,9 @@ class SolverGraph(GeodesicDistanceSolver):
         start_idx, end_idx = self.connect_to_graph(q0, q1, euclidean_only=connect_euclidean)
         path_idx = self.get_path_idx(start_idx, end_idx)
 
-        pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1], device=q0.device)
+        pts_on_traj = torch.zeros(
+            q0.shape[0], self.T, q0.shape[1], device=q0.device, dtype=q0.dtype
+        )
         for b in range(q0.shape[0]):
             pts_on_traj[b] = self.reparametrize_curve(
                 path_idx[b], q0[b], q1[b], smooth_curve=self.smooth_curve
@@ -1397,7 +1401,7 @@ class SolverGraph(GeodesicDistanceSolver):
         # Resample the curve
         cs = CubicSpline(np.linspace(0, 1, traj_q.shape[0]), traj_q.detach().cpu())
         traj_q = cs(np.arange(0, 1, self.dt))
-        traj_q = torch.from_numpy(traj_q).float().to(q0.device)
+        traj_q = torch.from_numpy(traj_q).to(q0.device).to(q0.dtype)
         return traj_q
 
 
@@ -2348,7 +2352,7 @@ class GEORCE(GeodesicDistanceSolver):
         d = x_0.shape[0]
 
         if x_t_0 is None:
-            t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
+            t = torch.linspace(0, 1, self.T + 1, device=x_0.device, dtype=x_0.dtype)
             x_t_0 = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, d)
         else:
             assert x_t_0.shape == (
@@ -2363,7 +2367,7 @@ class GEORCE(GeodesicDistanceSolver):
 
         x_t_i = x_t_0.clone().requires_grad_(True)  # (T-1, d), not including x_0 and x_T
         u_t_i = (
-            diff * torch.ones(self.T, d, device=x_0.device) / self.T
+            diff * torch.ones(self.T, d, device=x_0.device,dtype=x_0.dtype) / self.T
         )  # (T, d) Initial guess of the velocity, not including x_T
 
         # L4
