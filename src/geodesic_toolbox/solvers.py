@@ -24,7 +24,7 @@ from .utils import (
 )
 
 from tqdm import tqdm
-from torchdiffeq import odeint_adjoint, odeint
+from torchdiffeq import odeint
 
 
 class GeodesicDistanceSolver(torch.nn.Module):
@@ -68,10 +68,6 @@ class GeodesicDistanceSolver(torch.nn.Module):
         # distances = rearrange(distances, "(b n) -> b n", b=traj_q.shape[0])
 
         # # This version is more memory efficient but slower
-        # distances = torch.stack(
-        #     [self.cometric.inverse_forward(m, seg) for m, seg in zip(midpoints, segments)]
-        # )  # Forward per batch, could be slightly faster but whatever
-        # distances = torch.einsum("bni,bni->bn", segments, distances)
         distances = [self.cometric.metric(m, seg) for m, seg in zip(midpoints, segments)]
         distances = torch.stack(distances)
 
@@ -1004,7 +1000,6 @@ class SolverGraph(GeodesicDistanceSolver):
         indices = indices[:, 1:]  # Remove the point itself, (N_data, k)
         # Weight_matrix = np.zeros((N_data, N_data))
         Weight_matrix = torch.zeros((N_data, N_data), device=data.device, dtype=data.dtype)
-
         num_batches = (N_data + b_size - 1) // b_size
 
         pbar = tqdm(range(num_batches), desc="Initialize Graph", unit="batch")
@@ -1083,7 +1078,7 @@ class SolverGraph(GeodesicDistanceSolver):
             idx_correspondence[i, 1] = idx_j
         return idx_correspondence
 
-    def connect_graph(self, W) -> torch.Tensor:
+    def connect_graph(self, W: torch.Tensor) -> torch.Tensor:
         """
         Connect the connected components of the graph by adding dummy edges.
         This is a workaround to ensure that the graph is connected.
@@ -1091,12 +1086,12 @@ class SolverGraph(GeodesicDistanceSolver):
         """
         idx_correspondence = self.get_cc_connections_idx(W, self.data)
         a = self.data[idx_correspondence]
-        t = torch.arange(0, 1, self.dt, device=self.data.device).view(1, -1, 1)
+        t = torch.arange(0, 1, self.dt, device=self.data.device, dtype=W.dtype).view(1, -1, 1)
 
         p_i = a[:, 0][:, None, :]
         p_j = a[:, 1][:, None, :]
         linear_traj = p_i + t * (p_j - p_i)  # (n_cc,T,d)
-        dst = self.compute_distance(linear_traj)
+        dst = self.compute_distance(linear_traj).to(W.dtype)
         W[idx_correspondence[:, 0], idx_correspondence[:, 1]] = dst
         W[idx_correspondence[:, 1], idx_correspondence[:, 0]] = dst
         return W
@@ -1348,7 +1343,9 @@ class SolverGraph(GeodesicDistanceSolver):
 
         pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1], device=q0.device)
         for b in range(q0.shape[0]):
-            pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b],smooth_curve=self.smooth_curve)
+            pts_on_traj[b] = self.reparametrize_curve(
+                path_idx[b], q0[b], q1[b], smooth_curve=self.smooth_curve
+            )
 
         # pts_on_traj = self.get_pts_from_idx(start_idx, path_idx)
         pts_on_traj = torch.cat([q1[:, None, :], pts_on_traj, q0[:, None, :]], dim=1)
@@ -1662,7 +1659,9 @@ class SolverGraphFinsler(torch.nn.Module):
         # We add one to the number of neighbors to remove the point itself
         knn = NearestNeighbors(n_neighbors=n_neighbors + 1, algorithm="ball_tree")
         knn.fit(data.cpu())
-        t = torch.arange(0, 1, self.dt, device=data.device).view(1, 1, -1, 1)  # (1,1,T,1)
+        t = torch.arange(0, 1, self.dt, device=data.device, dtype=data.dtype).view(
+            1, 1, -1, 1
+        )  # (1,1,T,1)
 
         # Find the Euclidean kNN
         N_data = data.shape[0]
@@ -1752,7 +1751,9 @@ class SolverGraphFinsler(torch.nn.Module):
         """
         idx_correspondence = self.get_cc_connections_idx(W, self.data)
         a = self.data[idx_correspondence]
-        t = torch.arange(0, 1, self.dt, device=self.data.device).view(1, -1, 1)
+        t = torch.arange(0, 1, self.dt, device=self.data.device, dtype=self.data.dtype).view(
+            1, -1, 1
+        )
 
         p_i = a[:, 0][:, None, :]  # (n_cc,1,d)
         p_j = a[:, 1][:, None, :]  # (n_cc,1,d)
@@ -2013,9 +2014,13 @@ class SolverGraphFinsler(torch.nn.Module):
         start_idx, end_idx = self.connect_to_graph(q0, q1, euclidean_only=connect_euclidean)
         path_idx = self.get_path_idx(start_idx, end_idx)
 
-        pts_on_traj = torch.zeros(q0.shape[0], self.T, q0.shape[1], device=q0.device)
+        pts_on_traj = torch.zeros(
+            q0.shape[0], self.T, q0.shape[1], device=q0.device, dtype=q0.dtype
+        )
         for b in range(q0.shape[0]):
-            pts_on_traj[b] = self.reparametrize_curve(path_idx[b], q0[b], q1[b],smooth_curve=self.smooth_curve)
+            pts_on_traj[b] = self.reparametrize_curve(
+                path_idx[b], q0[b], q1[b], smooth_curve=self.smooth_curve
+            )
 
         # pts_on_traj = self.get_pts_from_idx(start_idx, path_idx)
         pts_on_traj = torch.cat([q1[:, None, :], pts_on_traj, q0[:, None, :]], dim=1)
@@ -2855,7 +2860,7 @@ class GEORCEFinsler(torch.nn.Module):
         d = x_0.shape[0]
 
         if x_t_0 is None:
-            t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
+            t = torch.linspace(0, 1, self.T + 1, device=x_0.device, dtype=x_0.dtype)
             x_t_0 = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, d)
         else:
             assert x_t_0.shape == (
@@ -2867,7 +2872,7 @@ class GEORCEFinsler(torch.nn.Module):
         # (T-1, d), not including x_0 and x_T
         x_t_i = x_t_0.clone().requires_grad_(True)
         # (T, d) Initial guess of the velocity, not including x_T
-        u_t_i = diff * torch.ones(self.T, d, device=x_0.device) / self.T
+        u_t_i = diff * torch.ones(self.T, d, device=x_0.device, dtype=x_0.dtype) / self.T
 
         G_0 = self.finsler.fundamental_tensor(x_0[None, :], u_t_i[0, :].unsqueeze(0)).squeeze(
             0
@@ -2949,7 +2954,7 @@ class GEORCEFinsler(torch.nn.Module):
             print(
                 "Warning: Gradient of the energy is NaN. Stopping optimization. Return straight line."
             )
-            t = torch.linspace(0, 1, self.T + 1, device=x_0.device)
+            t = torch.linspace(0, 1, self.T + 1, device=x_0.device, dtype=x_0.dtype)
             x_t_i = x_0[None, :] + t[1:-1, None] * (x_T - x_0)[None, :]  # (T-1, d)
 
         x_final = torch.cat([x_0[None, :], x_t_i, x_T[None, :]], dim=0)  # (T+1, d)
@@ -3183,14 +3188,29 @@ class ExpMapFinsler(torch.nn.Module):
         The maximum time to use for the geodesic trajectory.
     method : str
         The method to use for the ODE solver. See torchdiffeq documentation for more details.
+    boundary : float
+        The boundary value to stop the ODE solver when the state diverges.
+    resample : bool
+        If True, the trajectory is resampled to have T points even if the ODE solver stops early.
     """
 
-    def __init__(self, finsler: FinslerMetric, T_max=1.0, T=100, method="rk4"):
+    def __init__(
+        self,
+        finsler: FinslerMetric,
+        T_max=1.0,
+        T=100,
+        method="rk4",
+        boundary: float = 1e6,
+        resample: bool = True,
+    ):
         super().__init__()
         self.finsler = finsler
         self.T = T
+        self.T_max = T_max
         self.t = torch.linspace(0, T_max, T)
         self.method = method
+        self.boundary = boundary
+        self.resample = resample
 
     def get_dg_dq(self, q, p):
         """
@@ -3231,8 +3251,9 @@ class ExpMapFinsler(torch.nn.Module):
         gamma : torch.Tensor (d,d,d)
             Christoffel symbols
         """
-        g = self.finsler.fundamental_tensor(q.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
-        g_inv = g.inverse()
+        g_inv = self.finsler.inverse_fundamental_tensor(
+            q.unsqueeze(0), p.unsqueeze(0)
+        ).squeeze(0)
         dg_dq = self.get_dg_dq(q, p)
 
         gamma = (
@@ -3270,6 +3291,65 @@ class ExpMapFinsler(torch.nn.Module):
         dstate_dt = torch.cat((v, v_dot))
         return dstate_dt
 
+    def resample_state(self, state):
+        """
+        Resample the trajectory to have self.T points using cubic splines.
+
+        Parameters
+        ----------
+        state : torch.Tensor (T',2d)
+            State (position and momentum), T' <= T if the out of boundary event is triggered
+        Returns
+        -------
+        state : torch.Tensor (T,2d)
+            Resampled state (position and momentum)
+        """
+        x = state[:, : state.shape[1] // 2]
+        v = state[:, state.shape[1] // 2 :]
+
+        cs_x = CubicSpline(
+            torch.linspace(0, self.T_max, x.shape[0]).cpu(),
+            x.cpu(),
+            axis=0,
+        )
+        new_x = torch.tensor(cs_x(self.t.cpu()), device=x.device)
+
+        cs_v = CubicSpline(
+            torch.linspace(0, self.T_max, v.shape[0]).cpu(),
+            v.cpu(),
+            axis=0,
+        )
+        new_v = torch.tensor(cs_v(self.t.cpu()), device=v.device)
+
+        return torch.cat((new_x, new_v), dim=-1)
+
+    def stop_when_diverge(self, state):
+        """
+        Filter the trajectory to keep only the points where the norm of the position is below the boundary.
+        Stops the trajectory when the boundary is exceeded.
+
+        Parameters
+        ----------
+        state : torch.Tensor (2d,)
+            State (position and momentum)
+
+        Returns
+        -------
+        state : torch.Tensor (T',2d)
+            Filtered state (position and momentum), T' <= T if the out of boundary event is triggered
+        """
+        q = state[: state.shape[0] // 2]
+        q_norm = torch.linalg.vector_norm(q, dim=-1)
+        dq = q_norm - self.boundary
+        outside_pts = torch.where(dq > 0)[0]
+        if len(outside_pts) > 0:
+            first_outside = outside_pts[0]
+            state = state[:first_outside]
+
+            if self.resample:
+                state = self.resample_state(state)
+        return state
+
     def geodesic_shooting(self, q0, v0):
         """
         Computes the geodesic trajectory starting from position q0 and initial velocity v0
@@ -3283,15 +3363,19 @@ class ExpMapFinsler(torch.nn.Module):
 
         Returns
         -------
-        x_t : torch.Tensor (T,d)
-            Geodesic trajectory
-        v_t : torch.Tensor (T,d)
-            Velocity along the geodesic trajectory
+        x_t : torch.Tensor (T',d)
+            Geodesic trajectory, T' <= T if the out of boundary event is triggered
+        v_t : torch.Tensor (T',d)
+            Velocity along the geodesic trajectory, T' <= T if the out of boundary event is triggered
         """
         state_0 = torch.cat((q0, v0))
         state_T = odeint(
-            self.geodesic_ode, state_0, self.t.to(state_0.device), method=self.method
+            func=self.geodesic_ode,
+            y0=state_0,
+            t=self.t.to(q0.device),
+            method=self.method,
         )
+        state_T = self.stop_when_diverge(state_T)
         x_t = state_T[:, : q0.shape[0]]
         v_t = state_T[:, q0.shape[0] :]
         return x_t, v_t
@@ -3336,7 +3420,7 @@ class ExpMapFinsler(torch.nn.Module):
 
         Returns:
         -------
-        trajectories: Tensor (B, T, d)
+        trajectories: Tensor (B, T, d) or list of Tensors of shape (B, T_i, d)
             The geodesic trajectories starting at x_0 with initial velocity v_0
         """
         trajectories = []
@@ -3345,7 +3429,8 @@ class ExpMapFinsler(torch.nn.Module):
         for b in range(B):
             x_t, v_t = self.geodesic_shooting(x_0[b], v_0[b])
             trajectories.append(x_t)
-        trajectories = torch.stack(trajectories, dim=0)  # (B, T, d)
+        if len(set([traj.shape[0] for traj in trajectories])) == 1:
+            trajectories = torch.stack(trajectories, dim=0)  # (B, T, d)
         return trajectories
 
 
@@ -3365,14 +3450,29 @@ class ExpMapRiemann(torch.nn.Module):
         The maximum time to use for the geodesic trajectory.
     method : str
         The method to use for the ODE solver. See torchdiffeq documentation for more details.
+    boundary : float
+        The boundary value to stop the ODE solver when the state diverges.
+    resample : bool
+        If True, the trajectory is resampled to have T points even if the ODE solver stops early.
     """
 
-    def __init__(self, cometric: CoMetric, T_max=1.0, T=100, method="dopri5"):
+    def __init__(
+        self,
+        cometric: CoMetric,
+        T_max=1.0,
+        T=100,
+        method="dopri5",
+        boundary=1e5,
+        resample=True,
+    ):
         super().__init__()
         self.cometric = cometric
         self.T = T
+        self.T_max = T_max
         self.t = torch.linspace(0, T_max, T)
         self.method = method
+        self.boundary = boundary
+        self.resample = resample
 
     def hamiltonian(self, q: Tensor, p: Tensor) -> Tensor:
         """
@@ -3390,8 +3490,7 @@ class ExpMapRiemann(torch.nn.Module):
         H : torch.Tensor
             Hamiltonian value
         """
-        g_inv = self.cometric.cometric_tensor(q.unsqueeze(0)).squeeze(0)
-        H = 0.5 * (p @ g_inv) @ p
+        H = 0.5 * self.cometric.cometric(q.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
         return H
 
     def get_dH(self, q: Tensor, p: Tensor) -> tuple[Tensor, Tensor]:
@@ -3437,6 +3536,64 @@ class ExpMapRiemann(torch.nn.Module):
         dH_dq, dH_qp = self.get_dH(q, p)
         return torch.cat((dH_qp, -dH_dq))
 
+    def resample_state(self, state):
+        """
+        Resample the trajectory to have self.T points using cubic splines.
+
+        Parameters
+        ----------
+        state : torch.Tensor (T',2d)
+            State (position and momentum), T' <= T if the out of boundary event is triggered
+        Returns
+        -------
+        state : torch.Tensor (T,2d)
+            Resampled state (position and momentum)
+        """
+        x = state[:, : state.shape[1] // 2]
+        v = state[:, state.shape[1] // 2 :]
+
+        cs_x = CubicSpline(
+            torch.linspace(0, self.T_max, x.shape[0]).cpu(),
+            x.cpu(),
+            axis=0,
+        )
+        new_x = torch.tensor(cs_x(self.t.cpu()), device=x.device)
+
+        cs_v = CubicSpline(
+            torch.linspace(0, self.T_max, v.shape[0]).cpu(),
+            v.cpu(),
+            axis=0,
+        )
+        new_v = torch.tensor(cs_v(self.t.cpu()), device=v.device)
+
+        return torch.cat((new_x, new_v), dim=-1)
+
+    def stop_when_diverge(self, state):
+        """
+        Filter the trajectory to keep only the points where the norm of the position is below the boundary.
+        Stops the trajectory when the boundary is exceeded.
+
+        Parameters
+        ----------
+        state : torch.Tensor (2d,)
+            State (position and momentum)
+
+        Returns
+        -------
+        state : torch.Tensor (T',2d)
+            Filtered state (position and momentum), T' <= T if the out of boundary event is triggered
+        """
+        q = state[: state.shape[0] // 2]
+        q_norm = torch.linalg.vector_norm(q, dim=-1)
+        dq = q_norm - self.boundary
+        outside_pts = torch.where(dq > 0)[0]
+        if len(outside_pts) > 0:
+            first_outside = outside_pts[0]
+            state = state[:first_outside]
+            if self.resample:
+                state = self.resample_state(state)
+        return state
+
     def geodesic_shooting(self, q0: Tensor, p0: Tensor) -> tuple[Tensor, Tensor]:
         """
         Computes the geodesic trajectory starting from position q0 and initial momentum p0
@@ -3450,15 +3607,21 @@ class ExpMapRiemann(torch.nn.Module):
 
         Returns
         -------
-        q_t : torch.Tensor (T,d)
-            Geodesic trajectory
-        p_t : torch.Tensor (T,d)
-            Momentum along the geodesic trajectory
+        q_t : torch.Tensor (T',d)
+            Geodesic trajectory, T' <= T if the event is triggered
+        p_t : torch.Tensor (T',d)
+            Momentum along the geodesic trajectory, T' <= T if the event is triggered
         """
         state0 = torch.cat((q0, p0))
-        state_t = odeint(self.geodesic_ode, state0, self.t, method=self.method)
-        q_t = state_t[:, : q0.shape[0]]
-        p_t = state_t[:, q0.shape[0] :]
+        state_T = odeint(
+            func=self.geodesic_ode,
+            y0=state0,
+            t=self.t.to(q0.device),
+            method=self.method,
+        )
+        state_T = self.stop_when_diverge(state_T)
+        q_t = state_T[:, : q0.shape[0]]
+        p_t = state_T[:, q0.shape[0] :]
         return q_t, p_t
 
     def compute_distance(self, traj: torch.Tensor, tangent_vectors: torch.Tensor = None):
@@ -3503,7 +3666,7 @@ class ExpMapRiemann(torch.nn.Module):
 
         Returns:
         -------
-        trajectories: Tensor (B, T, d)
+        trajectories: Tensor (B, T, d) or list of Tensor or shape (B, T_i, d)
             The geodesic trajectories starting at x_0 with initial velocity v_0
         """
         if convert_to_moment:
@@ -3519,5 +3682,6 @@ class ExpMapRiemann(torch.nn.Module):
         for b in range(B):
             x_t, v_t = self.geodesic_shooting(x_0[b], v_0[b])
             trajectories.append(x_t)
-        trajectories = torch.stack(trajectories, dim=0)  # (B, T, d)
+        if len(set([traj.shape[0] for traj in trajectories])) == 1:
+            trajectories = torch.stack(trajectories, dim=0)  # (B, T, d)
         return trajectories
