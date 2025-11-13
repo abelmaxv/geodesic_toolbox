@@ -1884,16 +1884,18 @@ class SolverGraphFinsler(torch.nn.Module):
         ind1 = ind1[:, :-1]
 
         q0_neighbors = torch.zeros(
-            B, self.n_neighbors, self.data.shape[1], device=q0.device
+            B, self.n_neighbors, self.data.shape[1], device=q0.device, dtype=q0.dtype
         )  # (B,K,D)
-        q1_neighbors = torch.zeros(B, self.n_neighbors, self.data.shape[1], device=q0.device)
+        q1_neighbors = torch.zeros(
+            B, self.n_neighbors, self.data.shape[1], device=q0.device, dtype=q0.dtype
+        )
 
         for n in range(self.n_neighbors):
             q0_neighbors[:, n, :] = self.data[ind0[:, n]]
             q1_neighbors[:, n, :] = self.data[ind1[:, n]]
 
         # Find the points with the closest metric distance to q0 and q1
-        t = torch.arange(0, 1, self.dt, device=q0.device)
+        t = torch.arange(0, 1, self.dt, device=q0.device, dtype=q0.dtype)
 
         closest_q0 = torch.zeros(B).int()
         closest_q1 = torch.zeros(B).int()
@@ -2367,7 +2369,7 @@ class GEORCE(GeodesicDistanceSolver):
 
         x_t_i = x_t_0.clone().requires_grad_(True)  # (T-1, d), not including x_0 and x_T
         u_t_i = (
-            diff * torch.ones(self.T, d, device=x_0.device,dtype=x_0.dtype) / self.T
+            diff * torch.ones(self.T, d, device=x_0.device, dtype=x_0.dtype) / self.T
         )  # (T, d) Initial guess of the velocity, not including x_T
 
         # L4
