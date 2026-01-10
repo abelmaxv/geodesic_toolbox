@@ -2272,8 +2272,12 @@ class GEORCE(GeodesicDistanceSolver):
 
         curr_iter = 0
 
-        x_t_new = x_0 + torch.cumsum(alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0)
-        E_new = self.compute_energy(x_t_new, x_0, x_T)
+        # Evaluate new energy without building a graph (Armijo condition only)
+        with torch.no_grad():
+            x_t_new = x_0 + torch.cumsum(
+                alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0
+            )
+            E_new = self.compute_energy(x_t_new, x_0, x_T)
 
         # Compute Armijo's condition
         val = E_0 + self.c * alpha * torch.dot(grad_E_0, p_k)
@@ -2283,8 +2287,11 @@ class GEORCE(GeodesicDistanceSolver):
             alpha *= self.rho  # Reduce step size
             curr_iter += 1
 
-            x_t_new = x_0 + torch.cumsum(alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0)
-            E_new = self.compute_energy(x_t_new, x_0, x_T)
+            with torch.no_grad():
+                x_t_new = x_0 + torch.cumsum(
+                    alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0
+                )
+                E_new = self.compute_energy(x_t_new, x_0, x_T)
             val = E_0 + self.c * alpha * torch.dot(grad_E_0, p_k)
             condition = E_new > val
 
@@ -2362,8 +2369,9 @@ class GEORCE(GeodesicDistanceSolver):
                 d,
             ), f"x_t_0 must have shape {(self.T - 1, d)=} got {x_t_0.shape=}. But sure to exclude x_0 and x_T."
 
-        G_inv_0 = self.cometric.cometric_tensor(x_0[None, :]).squeeze(0)
-        G_0 = self.cometric.metric_tensor(x_0[None, :]).squeeze(0)
+        # Precompute cometric at start without building graph
+        with torch.no_grad():
+            G_inv_0 = self.cometric.cometric_tensor(x_0[None, :]).squeeze(0)
 
         diff = x_T - x_0
 
@@ -2379,9 +2387,11 @@ class GEORCE(GeodesicDistanceSolver):
             grad_E_t.shape[0] * grad_E_t.shape[1]
         )  # Normalize by the dimension
 
-        dst_list = [self.dst_func(x_0, x_T, x_t_i).item()]
+        with torch.no_grad():
+            dst_list = [self.dst_func(x_0, x_T, x_t_i).item()]
         norm_gE_list = [norm_grad_E_t.item()]
-        E_list = [self.compute_energy(x_t_i, x_0, x_T).item()]
+        with torch.no_grad():
+            E_list = [self.compute_energy(x_t_i, x_0, x_T).item()]
         alpha_list = [1.0]
 
         if self.pbar:
@@ -2421,11 +2431,12 @@ class GEORCE(GeodesicDistanceSolver):
             alpha = self.line_search(x_0, x_T, u_t, u_t_i, x_t_i)
             # alpha = 0.1
 
-            # L11
-            u_t_i = alpha * u_t + (1 - alpha) * u_t_i
-
-            # L12
-            x_t_i = x_0 + torch.cumsum(u_t_i[:-1], dim=0)  # (T-1, d)
+            # L11/L12: update state without tracking to avoid graph growth
+            with torch.no_grad():
+                u_t_i = alpha * u_t + (1 - alpha) * u_t_i
+                x_t_i = x_0 + torch.cumsum(u_t_i[:-1], dim=0)  # (T-1, d)
+            # Re-enable grad only on trajectory points for next iteration
+            x_t_i = x_t_i.detach().requires_grad_(True)
 
             # Prepare stop condition, ie L4
             grad_E_t = self.grad_E(x_t_i, x_0, x_T)
@@ -2436,8 +2447,9 @@ class GEORCE(GeodesicDistanceSolver):
             i += 1
 
             # Logging
-            dst = self.dst_func(x_0, x_T, x_t_i).item()
-            E = self.compute_energy(x_t_i, x_0, x_T).item()
+            with torch.no_grad():
+                dst = self.dst_func(x_0, x_T, x_t_i).item()
+                E = self.compute_energy(x_t_i, x_0, x_T).item()
             dst_list.append(dst)
             norm_gE_list.append(norm_grad_E_t.item())
             E_list.append(E)
@@ -2783,8 +2795,12 @@ class GEORCEFinsler(torch.nn.Module):
 
         curr_iter = 0
 
-        x_t_new = x_0 + torch.cumsum(alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0)
-        E_new = self.compute_energy(x_t_new, x_0, x_T)
+        # Evaluate candidate energies without building a graph (Armijo condition only)
+        with torch.no_grad():
+            x_t_new = x_0 + torch.cumsum(
+                alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0
+            )
+            E_new = self.compute_energy(x_t_new, x_0, x_T)
 
         # Compute Armijo's condition
         val = E_0 + self.c * alpha * torch.dot(grad_E_0, p_k)
@@ -2794,8 +2810,11 @@ class GEORCEFinsler(torch.nn.Module):
             alpha *= self.rho  # Reduce step size
             curr_iter += 1
 
-            x_t_new = x_0 + torch.cumsum(alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0)
-            E_new = self.compute_energy(x_t_new, x_0, x_T)
+            with torch.no_grad():
+                x_t_new = x_0 + torch.cumsum(
+                    alpha * u_t[:-1] + (1 - alpha) * u_t_i[:-1], dim=0
+                )
+                E_new = self.compute_energy(x_t_new, x_0, x_T)
             val = E_0 + self.c * alpha * torch.dot(grad_E_0, p_k)
             condition = E_new > val
 
@@ -2880,9 +2899,11 @@ class GEORCEFinsler(torch.nn.Module):
         # (T, d) Initial guess of the velocity, not including x_T
         u_t_i = diff * torch.ones(self.T, d, device=x_0.device, dtype=x_0.dtype) / self.T
 
-        G_0 = self.finsler.fundamental_tensor(x_0[None, :], u_t_i[0, :].unsqueeze(0)).squeeze(
-            0
-        )
+        # Precompute fundamental tensor at start without building graph
+        with torch.no_grad():
+            G_0 = self.finsler.fundamental_tensor(x_0[None, :], u_t_i[0, :].unsqueeze(0)).squeeze(
+                0
+            )
 
         # L4
         grad_E_t = torch.autograd.grad(
@@ -2895,9 +2916,11 @@ class GEORCEFinsler(torch.nn.Module):
             grad_E_t.shape[0] * grad_E_t.shape[1]
         )  # Normalize by the dimension
 
-        dst_list = [self.dst_func(x_0, x_T, x_t_i).item()]
+        with torch.no_grad():
+            dst_list = [self.dst_func(x_0, x_T, x_t_i).item()]
         norm_gE_list = [norm_grad_E_t.item()]
-        E_list = [self.compute_energy(x_t_i, x_0, x_T, dx=u_t_i).item()]
+        with torch.no_grad():
+            E_list = [self.compute_energy(x_t_i, x_0, x_T, dx=u_t_i).item()]
         alpha_list = [1.0]
 
         if self.pbar:
@@ -2923,11 +2946,12 @@ class GEORCEFinsler(torch.nn.Module):
             alpha = self.line_search(x_0, x_T, u_t, u_t_i, x_t_i)
             # alpha = 0.00001
 
-            # L12
-            u_t_i = alpha * u_t + (1.0 - alpha) * u_t_i
-
-            # L13
-            x_t_i = x_0 + torch.cumsum(u_t_i[:-1], dim=0)  # (T-1, d)
+            # L12/L13: update state without tracking to avoid graph growth
+            with torch.no_grad():
+                u_t_i = alpha * u_t + (1.0 - alpha) * u_t_i
+                x_t_i = x_0 + torch.cumsum(u_t_i[:-1], dim=0)  # (T-1, d)
+            # Re-enable grad only on trajectory points for next iteration
+            x_t_i = x_t_i.detach().requires_grad_(True)
 
             # Prepare stop condition, ie L4
             grad_E_t = torch.autograd.grad(
@@ -2939,8 +2963,9 @@ class GEORCEFinsler(torch.nn.Module):
             i += 1
 
             # Logging
-            dst = self.dst_func(x_0, x_T, x_t_i).item()
-            E = self.compute_energy(x_t_i, x_0, x_T).item()
+            with torch.no_grad():
+                dst = self.dst_func(x_0, x_T, x_t_i).item()
+                E = self.compute_energy(x_t_i, x_0, x_T).item()
             dst_list.append(dst)
             norm_gE_list.append(norm_grad_E_t.item())
             E_list.append(E)
