@@ -418,18 +418,16 @@ def sample_pts(cometric, q0, N_pts, std=0.2):
     v : torch.Tensor (N_pts, d)
         Sampled points
     """
-    G_inv = cometric.cometric_tensor(q0.unsqueeze(0)).squeeze(0)
+    # Sample according to N(0, G_inv)
+    v = std * torch.randn((N_pts, q0.shape[0]), device=q0.device, dtype=q0.dtype)
+    # G_inv = cometric.cometric_tensor(q0.unsqueeze(0)).squeeze(0)
+    G_inv = cometric.metric_tensor(q0.unsqueeze(0)).squeeze(0)
     if cometric.is_diag:
         L = G_inv.sqrt()
-    else:
-        L = torch.linalg.cholesky(G_inv)
-    # Sample according to N(0, G_inv)
-    v = torch.randn((N_pts, 2)) * std
-    if cometric.is_diag:
         v = v * L
     else:
+        L = torch.linalg.cholesky(G_inv)
         v = torch.einsum("ij,bj->bi", L, v)
-
     return v
 
 
@@ -487,8 +485,11 @@ def sample_cone(
         )
     return v
 
-def sample_cone_VMF(x_0: Tensor, randers: RandersMetrics,kappa: float,alpha: float=1.0) -> Tensor:
-    """ 
+
+def sample_cone_VMF(
+    x_0: Tensor, randers: RandersMetrics, kappa: float, alpha: float = 1.0
+) -> Tensor:
+    """
     Samples point from a VMF distribution centered around - omega(x_0) with concentration kappa.
     Then flips the sample so that it is in the cone defined by -omega(x_0).
     Finally samples are scaled to have norm alpha.
@@ -514,8 +515,9 @@ def sample_cone_VMF(x_0: Tensor, randers: RandersMetrics,kappa: float,alpha: flo
     dot_prod = torch.einsum("bi,bi->b", v, -omega_x0)
     mask = dot_prod < 0
     v[mask] = -v[mask]
-    v = alpha * v/torch.linalg.norm(v, dim=-1, keepdim=True)
+    v = alpha * v / torch.linalg.norm(v, dim=-1, keepdim=True)
     return v
+
 
 def random_VMF(mu, kappa, size=None):
     """
@@ -589,7 +591,6 @@ def _random_VMF(mu, kappa, size=None):
     # combine angles with the z component
     x = z * sin[:, None] + cos[:, None] * mu[None, :]
     return x.reshape((*shape, d))
-
 
 
 def _random_VMF_cos(d: int, kappa: float, n: int):
