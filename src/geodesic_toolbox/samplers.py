@@ -4,7 +4,7 @@ from tqdm import tqdm
 from torch import Tensor
 from torch.linalg import LinAlgError as _LinAlgError
 
-from .cometric import CoMetric, mat_sqrt
+from .cometric import CoMetric, mat_sqrt, RandersMetrics
 
 
 class Sampler(nn.Module):
@@ -1824,3 +1824,115 @@ class ExplicitRHMCSampler(Sampler):
         if return_acceptance:
             return z_0, acceptance_rate
         return z_0
+
+
+class ExplicitRFHMCSampler(ExplicitRHMCSampler):
+    """
+    Explicit Riemannian Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
+    It uses a Randers metric to propose new samples hence providing
+    time consistent trajectories.
+    It uses the augmented leapfrog integrator to propose new samples from the target distribution.
+    It uses a tempering scheme on the momentum.
+    Here the target distribution is defined by the volume element of the cometric.
+    But this class is easily heritable to define other target distributions. Just redefine
+    the p_target method.
+
+    `Introducing an Explicit Symplectic Integration Scheme for Riemannian Manifold Hamiltonian Monte Carlo`
+    by Cobb et Baydin et al (2019).
+
+    Parameters
+    ----------
+    randers : RandersMetrics
+        The Randers metric that defines the target distribution.
+    l : int
+        The number of leapfrog steps.
+    gamma : float
+        The step size.
+    omega : float
+        The binding parameter
+    N_run : int
+        The number of iterations.
+    std_0 : float
+        The standard deviation of the initial momentum.
+    bounds : float
+        The bounds of the target distribution. This is because the distribution must be supported on a bounded set.
+    beta_0 : float
+        The initial temperature for the tempering of the momentum.
+    pbar : bool
+        If True, it shows a progress bar.
+    skip_acceptance : bool
+        If True, the acceptance step is skipped. This can be used when differentiabily is needed.
+    """
+
+    def __init__(
+        self,
+        randers: RandersMetrics,
+        l: int,
+        gamma: float,
+        omega: float,
+        N_run: int,
+        bounds: float,
+        std_0: float = 1.0,
+        beta_0: float = 1,
+        pbar: bool = False,
+        skip_acceptance: bool = False,
+    ):
+        super().__init__(
+            randers.base_cometric,
+            l,
+            gamma,
+            omega,
+            N_run,
+            bounds,
+            std_0,
+            beta_0,
+            pbar,
+            skip_acceptance,
+        )
+        self.randers = randers
+
+    # # Override the kinetic energy function to use the Randers cometric
+    # def K(self, v: Tensor, z: Tensor) -> Tensor:
+    #     """
+    #     Compute the kinetic energy K(v) = - N(v ;0, g(z))
+    #     ie K(v) = 1/2 * v^T g_inv(z) v - 1/2 * log(det(g_inv(z)))
+    #     where g is fundamental tensor of the Randers metric.
+
+    #     Parameters
+    #     ----------
+    #     v : Tensor (b,d)
+    #         The velocity.
+    #     z : Tensor (b,d)
+    #         The position.
+
+    #     Returns
+    #     -------
+    #     kinetic energy : Tensor (b,)
+    #     """
+    #     g_fund = self.randers.fundamental_tensor(z, v)
+    #     g_fund_inv = torch.linalg.inv(g_fund)
+    #     logdet_ginv = torch.logdet(g_fund_inv)
+    #     velocity = torch.einsum("bj,bij,bi->b", v, g_fund_inv, v)
+    #     return 0.5 * velocity - 0.5 * logdet_ginv + 0.5 * v.shape[1] * self.log2pi
+
+    def sample_momentum(self, z: Tensor) -> Tensor:
+        """
+        Sample the momentum from N(0, g(z,omega(z)))
+
+        Parameters
+        ----------
+        z : Tensor (b,d)
+            The position.
+
+        Returns
+        -------
+        v : Tensor (b,d)
+            The sampled momentum.
+        """
+        g = self.cometric.metric_tensor(z)
+        v = torch.randn_like(z)
+        omega = self.randers.omega(z)
+        dot_prod = torch.einsum("bi,bi->b", v, omega)
+        v = torch.sign(dot_prod)[:, None] * v
+        v = -torch.einsum("bij,bi->bj", mat_sqrt(g), v) * self.std_0
+        return v
