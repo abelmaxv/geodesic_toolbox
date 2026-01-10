@@ -581,6 +581,18 @@ class DiffeoCometric(CoMetric):
         g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
+    #@TODO: implement the dot as <J(q)u, J(q)v> using jvp. Avoid to compute the full metric tensor.
+    def dot(self, q, u, v):
+        Jqu = torch.func.jvp(self.diffeo, q, u)[1]
+        Jqv = torch.func.jvp(self.diffeo, q, v)[1]
+        if not self.use_id:
+            g_base = self.base_cometric.metric_tensor(self.diffeo(q))
+            return torch.einsum("bi,bij,bj->b", Jqu, g_base, Jqv)
+        else:
+            return torch.sum(Jqu * Jqv, dim=1)
+
+    #     ...
+
     def extra_repr(self) -> str:
         return f"reg_coef={self.reg_coef}, chunk_size={self.chunk_size}"
 
