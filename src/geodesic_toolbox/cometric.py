@@ -496,10 +496,10 @@ class FunctionnalHeightMapCometric(CoMetric):
         return g_inv
 
 
-class DiffeoCometric(CoMetric):
+class PullBackCometric(CoMetric):
     """
-    Class for the cometric inherited by a diffeomorphism between manifolds.
-    If J_f is the jacobian of the diffeomorphism f and G the base metric, the metric is given by:
+    Class for the cometric given by the pullback of a diffeomorphism between manifolds.
+    If J_f is the jacobian of the diffeomorphism f and G the base metric on the target manifold, the metric is given by:
     g(x) = J_f(x)^T @ G(f(x)) @ J_f(x)
 
     Parameters
@@ -511,12 +511,16 @@ class DiffeoCometric(CoMetric):
     reg_coef: float
         Regularization coefficient for the metric
     chunk_size: int
-        Chunk size to use for computing the jacobian. Specifiy a value if running in memory issues.
+        Chunk size to use for computing the jacobian. Specify a value if running in memory issues.
     vmap_ok : bool
         If True, use vmap to compute the jacobian. Else, use a for loop.
-    use_id: bool
-        If True, G will always be the identity matrix. This is used to avoid
-        allocating large matrices when the base metric is Euclidean. Defaults to True.
+        Beware that using vmap can lead to very high memory consumption.
+
+    Note that if the diffeomorphism has a method 'jacobian', it will be used directly.
+    This method should have signature (B,d) -> (B,d_out,d)
+
+    Important remark : the current implementation of the jacobian via autograd can be very slow for high-dimensional outputs.
+    Moreover it doesn't support higher order derivatives, eg for christoffel symbols computation.
     """
 
     def __init__(
@@ -525,26 +529,56 @@ class DiffeoCometric(CoMetric):
         base_cometric: CoMetric = IdentityCoMetric(is_diag=False),
         reg_coef: float = 1e-3,
         chunk_size: int = 4,
-        vmap_ok: bool = True,
-        use_id: bool = True,
+        vmap_ok: bool = False,
     ):
         super().__init__()
         self.diffeo = diffeo
         self.reg_coef = reg_coef
         self.chunk_size = chunk_size
         self.base_cometric = base_cometric
-        self.use_id = use_id
 
         if hasattr(self.diffeo, "jacobian"):
             self.jacobian = self.diffeo.jacobian
         elif vmap_ok:
             self.no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
             self.jacobian_ = torch.func.jacrev(self.no_batch_forward, chunk_size=chunk_size)
-            self.jacobian = torch.vmap(self.jacobian_, chunk_size=None)
+            self.jacobian = torch.vmap(self.jacobian_, chunk_size=chunk_size)
         else:
-            self.no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
-            self.jacobian_ = torch.func.jacrev(self.no_batch_forward, chunk_size=chunk_size)
-            self.jacobian = self.jacobian_loop
+            # self.no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
+            # self.jacobian = self.jacobian_loop
+            self.jacobian = self.jacobian_autograd
+
+    def jacobian_autograd(self,x):
+        """
+        Computes the pullback metric G = J_f^T @ J_f via autograd.
+
+        Parameters:
+        -----------
+        x: (B, d)
+            Batch of points where to compute the pullback metric
+
+        Returns:
+        --------
+        G: (B, d, d)
+            Batch of pullback metrics
+        """
+        x.requires_grad_(True)
+        d = x.shape[1]
+        y_flat = self.diffeo(x).flatten(start_dim=1)  # (B, hw)
+        B, hw = y_flat.shape
+
+        G = torch.zeros(B, d, d, device=x.device, dtype=x.dtype)
+        for i in range(hw):
+            grad_i = torch.autograd.grad(
+                y_flat[:, i].sum(),  # sum over batch to get batch gradients
+                x,
+                retain_graph=(i < hw - 1),
+                create_graph=False,
+                # change this line if higher order derivatives are needed
+                # tips : it will crash of OOM. good luck
+            )[0]
+            G += torch.einsum("bi,bj->bij", grad_i, grad_i)
+        return G
 
     def jacobian_loop(self, x: torch.Tensor):
         """
@@ -569,7 +603,7 @@ class DiffeoCometric(CoMetric):
 
     def metric_tensor(self, q: torch.Tensor):
         jacobian = self.jacobian(q)
-        if not self.use_id:
+        if not isinstance(self.base_cometric, IdentityCoMetric):
             g_base = self.base_cometric.metric_tensor(self.diffeo(q))
             g = jacobian.mT @ g_base @ jacobian
         else:
@@ -581,17 +615,15 @@ class DiffeoCometric(CoMetric):
         g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
-    #@TODO: implement the dot as <J(q)u, J(q)v> using jvp. Avoid to compute the full metric tensor.
     def dot(self, q, u, v):
-        Jqu = torch.func.jvp(self.diffeo, q, u)[1]
-        Jqv = torch.func.jvp(self.diffeo, q, v)[1]
-        if not self.use_id:
+        flat_forward = lambda x: self.diffeo(x).flatten(start_dim=1)
+        Jqu = torch.func.jvp(flat_forward, (q,), (u,))[1]
+        Jqv = torch.func.jvp(flat_forward, (q,), (v,))[1]
+        if not isinstance(self.base_cometric, IdentityCoMetric):
             g_base = self.base_cometric.metric_tensor(self.diffeo(q))
             return torch.einsum("bi,bij,bj->b", Jqu, g_base, Jqv)
         else:
             return torch.sum(Jqu * Jqv, dim=1)
-
-    #     ...
 
     def extra_repr(self) -> str:
         return f"reg_coef={self.reg_coef}, chunk_size={self.chunk_size}"
@@ -621,7 +653,7 @@ class LiftedCometric(CoMetric):
         self.h = h
         self.beta = beta
 
-        self.diffeo = DiffeoCometric(
+        self.diffeo = PullBackCometric(
             diffeo=self.h,
             reg_coef=0,
         )
