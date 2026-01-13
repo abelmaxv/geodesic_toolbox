@@ -568,7 +568,10 @@ class PullBackCometric(CoMetric):
         B, hw = y_flat.shape
 
         G = torch.zeros(B, d, d, device=x.device, dtype=x.dtype)
-        for i in range(hw):
+        # for i in range(hw):
+        pbar = tqdm(range(hw), desc="Computing pullback metric via autograd", leave=False)
+        for i in pbar:
+            pbar.set_postfix({"Jacobian column": f"{i+1}/{hw}"})
             grad_i = torch.autograd.grad(
                 y_flat[:, i].sum(),  # sum over batch to get batch gradients
                 x,
@@ -841,6 +844,7 @@ class CentroidsCometric(CoMetric):
         If True, the interpolation weights is given by N(c_k,Sigma_k) else it is N(c_k,Id).
     """
 
+    # @TODO : change metric_weight default value to False.
     def __init__(
         self,
         centroids: Tensor = None,
