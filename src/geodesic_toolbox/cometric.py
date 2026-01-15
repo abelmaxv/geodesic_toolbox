@@ -1011,9 +1011,9 @@ class CentroidsCometric(CoMetric):
             self.register_buffer("centroids", centroids)
         if cometric_centroids is not None:
             self.register_buffer("cometric_centroids", cometric_centroids)
-        self.register_buffer("temperature", Tensor(temperature))
-        self.register_buffer("reg_coef", Tensor(reg_coef))
-        self.register_buffer("temperature_scale", Tensor(temperature_scale))
+        self.register_buffer("temperature", Tensor([temperature]))
+        self.register_buffer("reg_coef", Tensor([reg_coef]))
+        self.register_buffer("temperature_scale", Tensor([temperature_scale]))
 
         if K is not None and centroids is not None:
             self.process_centroids(K)
@@ -1672,7 +1672,7 @@ class RandersMetrics(FinslerMetric):
         F = x_norm + self.beta * omega_x_v
         return F
 
-    def fund_tensor_analytic_(self, z: Tensor, v: Tensor)-> Tensor:
+    def fund_tensor_analytic_(self, z: Tensor, v: Tensor) -> Tensor:
         """
         Computes the fundamental tensor of the Randers metric using the analytic formula.
 
@@ -1713,7 +1713,7 @@ class RandersMetrics(FinslerMetric):
 
         return g
 
-    #@TODO: It doesn't work, use autograd instead. Fix this
+    # @TODO: It doesn't work, use autograd instead. Fix this
     def inv_fund_tensor_analytic_(self, q: Tensor, v: Tensor) -> Tensor:
         """
         Computes the inverse of the fundamental tensor of the Randers metric using the analytic formula.
@@ -1722,7 +1722,7 @@ class RandersMetrics(FinslerMetric):
         It doesn't work, use autograd instead
 
         Parameters:
-        ----------  
+        ----------
         q : Tensor (b,d)
             Points in the manifold
         v : Tensor (b,d)
