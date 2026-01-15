@@ -515,6 +515,8 @@ class PullBackCometric(CoMetric):
     vmap_ok : bool
         If True, use vmap to compute the jacobian. Else, use a for loop.
         Beware that using vmap can lead to very high memory consumption.
+    eps: float
+        Small value to compute the jacobian using finite differences approximation.
 
     Note that if the diffeomorphism has a method 'jacobian', it will be used directly.
     This method should have signature (B,d) -> (B,d_out,d)
@@ -528,30 +530,41 @@ class PullBackCometric(CoMetric):
         diffeo: torch.nn.Module,
         base_cometric: CoMetric = IdentityCoMetric(is_diag=False),
         reg_coef: float = 1e-3,
+        method: str = "finite_difference",
         chunk_size: int = 4,
-        vmap_ok: bool = False,
+        # vmap_ok: bool = False,
+        eps: float = 1e-4,
     ):
         super().__init__()
-        self.diffeo = diffeo
-        self.reg_coef = reg_coef
-        self.chunk_size = chunk_size
-        self.base_cometric = base_cometric
+        valid_methods = ["finite_difference", "autograd", "vmap", "jacobian_method"]
 
-        if hasattr(self.diffeo, "jacobian"):
-            self.jacobian = self.diffeo.jacobian
-        elif vmap_ok:
+        self.diffeo = diffeo
+        self.base_cometric = base_cometric
+        self.eps = eps
+        self.reg_coef = reg_coef
+        self.method = method
+        self.chunk_size = chunk_size
+
+        if method == "jacobian_method":
+            if hasattr(self.diffeo, "jacobian"):
+                self.jacobian = self.diffeo.jacobian
+            else:
+                raise ValueError("Diffeomorphism does not have a 'jacobian' method")
+        elif method == "vmap":
             self.no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
             self.jacobian_ = torch.func.jacrev(self.no_batch_forward, chunk_size=chunk_size)
             self.jacobian = torch.vmap(self.jacobian_, chunk_size=chunk_size)
-        else:
-            # self.no_batch_forward = lambda x: self.diffeo(x.unsqueeze(0)).flatten()
-            # self.jacobian = self.jacobian_loop
+        elif method == "autograd":
             self.jacobian = self.jacobian_autograd
+        elif method == "finite_difference":
+            self.jacobian = self.jacobian_finite_difference
+        else:
+            raise ValueError(f"Invalid method {method}. Valid methods are {valid_methods}")
 
     @torch.enable_grad()
     def jacobian_autograd(self, x):
         """
-        Computes the pullback metric G = J_f^T @ J_f via autograd.
+        Computes the jacobian of the diffeomorphism at the points x using autograd.
 
         Parameters:
         -----------
@@ -560,16 +573,15 @@ class PullBackCometric(CoMetric):
 
         Returns:
         --------
-        G: (B, d, d)
-            Batch of pullback metrics
+        jacobian : torch.Tensor (B,d_out,d)
+            Batch of jacobians
         """
         x.requires_grad_(True)
         d = x.shape[1]
         y_flat = self.diffeo(x).flatten(start_dim=1)  # (B, hw)
         B, hw = y_flat.shape
 
-        G = torch.zeros(B, d, d, device=x.device, dtype=x.dtype)
-        # for i in range(hw):
+        J = torch.zeros(B, hw, d, device=x.device, dtype=x.dtype)
         pbar = tqdm(range(hw), desc="Computing pullback metric via autograd", leave=False)
         for i in pbar:
             pbar.set_postfix({"Jacobian column": f"{i+1}/{hw}"})
@@ -578,11 +590,48 @@ class PullBackCometric(CoMetric):
                 x,
                 retain_graph=(i < hw - 1),
                 create_graph=False,
-                # change this line if higher order derivatives are needed
+                # change this line if higher order derivatives are needed 
+                # eg christoffel symbols
                 # tips : it will crash of OOM. good luck
             )[0]
-            G += torch.einsum("bi,bj->bij", grad_i, grad_i)
-        return G
+            J[:, i, :] = grad_i
+        return J
+
+    def jacobian_finite_difference(self, x):
+        """
+        Computes the jacobian of the diffeomorphism at the points x using finite differences.
+        More precisely , for each point x_i in the batch, and each dimension j,
+        we compute the j-th column of the jacobian as:
+        J_ij = (f(x_i + h e_j) - f(x_i - h e_j)) / (2h)
+        where e_j is the j-th standard basis vector and h is a small constant.
+
+        Parameters
+        ----------
+        x : torch.Tensor (B,d)
+            Batch of points where to compute the jacobian
+
+        Returns
+        -------
+        jacobian : torch.Tensor (B,d_out,d)
+            Batch of jacobians
+        """
+        B, d = x.shape
+        flatten_diffeo = lambda x: self.diffeo(x).flatten(start_dim=1)
+        y0 = flatten_diffeo(x)  # (B,d_out)
+        d_out = y0.shape[1]
+        J = torch.zeros(B, d_out, d, device=x.device, dtype=x.dtype)
+        eye = torch.eye(d, device=x.device, dtype=x.dtype)
+        pbar = tqdm(
+            range(d), desc="Computing pullback metric via finite differences", leave=False
+        )
+        for j in pbar:
+            pbar.set_postfix({"Jacobian column": f"{j+1}/{d}"})
+            x_plus = x + self.eps * eye[j]
+            x_minus = x - self.eps * eye[j]
+            y_plus = flatten_diffeo(x_plus)
+            y_minus = flatten_diffeo(x_minus)
+            J[:, :, j] = (y_plus - y_minus) / (2 * self.eps)
+        return J
 
     @torch.enable_grad()
     def jacobian_loop(self, x: torch.Tensor):
