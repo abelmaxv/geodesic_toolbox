@@ -548,7 +548,8 @@ class PullBackCometric(CoMetric):
             # self.jacobian = self.jacobian_loop
             self.jacobian = self.jacobian_autograd
 
-    def jacobian_autograd(self,x):
+    @torch.enable_grad()
+    def jacobian_autograd(self, x):
         """
         Computes the pullback metric G = J_f^T @ J_f via autograd.
 
@@ -583,6 +584,7 @@ class PullBackCometric(CoMetric):
             G += torch.einsum("bi,bj->bij", grad_i, grad_i)
         return G
 
+    @torch.enable_grad()
     def jacobian_loop(self, x: torch.Tensor):
         """
         Computes the jacobian of the diffeomorphism at the points x using a for loop.
