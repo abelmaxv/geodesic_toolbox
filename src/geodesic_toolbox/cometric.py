@@ -11,7 +11,7 @@ import kmedoids
 ################################################################
 
 
-def empirical_cov_mat(x: Tensor, mu: Tensor = None, eps=1e-6):
+def empirical_cov_mat(x: Tensor, mu: Tensor = None, eps: float = 1e-6) -> Tensor:
     """Computes the empirical covariance matrix of the data x.
     If mu is provided, the covariance is computed with respect to mu.
     Else the covariance is computed with respect to the mean of x.
@@ -38,7 +38,7 @@ def empirical_cov_mat(x: Tensor, mu: Tensor = None, eps=1e-6):
     return cov
 
 
-def empirical_diag_cov_mat(x: Tensor, mu: Tensor = None, eps: float = 1e-6):
+def empirical_diag_cov_mat(x: Tensor, mu: Tensor = None, eps: float = 1e-6) -> Tensor:
     """Computes the empirical covariance matrix of the data x.
     The matrix is here diagonal.
     If mu is provided, the covariance is computed with respect to mu.
@@ -87,7 +87,7 @@ def mat_sqrt(A: Tensor) -> Tensor:
     return (Q * L.sqrt().unsqueeze(-2)) @ Q.mH
 
 
-def SoftAbs(M, alpha=1e3):
+def SoftAbs(M: Tensor, alpha: float = 1e3) -> Tensor:
     """
     SoftAbs regularisation of a matrix M. It is used to ensure that the matrix is positive definite.
     This is especially useful when using the Fisher information matrix.
@@ -128,8 +128,14 @@ def SoftAbs(M, alpha=1e3):
 
 
 class CoMetric(torch.nn.Module):
-    """Abstract class for cometrics.
+    """
+    Abstract class for cometrics.
     A cometric is here a function that takes a (batch of) point and returns the cometric tensor at that point.
+
+    Parameters:
+    -----------
+    is_diag : bool
+        If True, the cometric is diagonal and the forward method returns only the diagonal elements.
     """
 
     def __init__(self, is_diag: bool = False):
@@ -137,13 +143,18 @@ class CoMetric(torch.nn.Module):
         self.is_diag = is_diag
 
     def inv_logdet(self, q: Tensor) -> Tensor:
-        """Computes log(det(G^-1(q))) for a batch of points q
+        """
+        Computes log(det(G^-1(q))) for a batch of points q
 
-        Params:
-        q : Tensor (b,d) batch of points
+        Parameters:
+        -----------
+        q : Tensor (b, d)
+            Batch of points
 
-        Output:
-        res : Tensor (b,) log(det(G^-1(q)))
+        Returns:
+        -------
+        res : Tensor (b,)
+            log(det(G^-1(q)))
         """
         G_inv = self.cometric_tensor(q)
         if not self.is_diag:
@@ -152,13 +163,18 @@ class CoMetric(torch.nn.Module):
             return torch.sum(torch.log(G_inv), dim=1)
 
     def logdet(self, q: Tensor) -> Tensor:
-        """Computes log(det(G(q))) for a batch of points q
+        """
+        Computes log(det(G(q))) for a batch of points q
 
-        Params:
-        q : Tensor (b,d) batch of points
+        Parameters:
+        -----------
+        q : Tensor (b, d)
+            Batch of points
 
-        Output:
-        res : Tensor (b,) log(det(G(q)))
+        Returns:
+        --------
+        res : Tensor (b,)
+            log(det(G(q)))
         """
         G = self.metric_tensor(q)
         if not self.is_diag:
@@ -167,26 +183,36 @@ class CoMetric(torch.nn.Module):
             return torch.sum(torch.log(G), dim=1)
 
     def cometric_tensor(self, q: Tensor) -> Tensor:
-        """Computes G^-1(q) for a batch of points q
+        """
+        Computes G^-1(q) for a batch of points q
 
-        Params:
-        q : Tensor (b,d) batch of points
+        Parameters:
+        -----------
+        q : Tensor (b, d)
+            Batch of points
 
-        Output:
-        res : Tensor (b,d,d) inverse metric tensor
-            or Tensor (b,d) if is_diag is True
+        Returns:
+        --------
+        res : Tensor (b, d, d)
+            Inverse metric tensor
+            or Tensor (b, d) if is_diag is True
         """
         return self.forward(q)
 
     def metric_tensor(self, q: Tensor) -> Tensor:
-        """Computes G(q) for a batch of points q
+        """
+        Computes G(q) for a batch of points q
 
-        Params:
-        q : Tensor (b,d) batch of points
+        Parameters:
+        -----------
+        q : Tensor (b, d)
+            Batch of points
 
-        Output:
-        res : Tensor (b,d,d) metric tensor
-            or Tensor (b,d) if is_diag is True
+        Returns:
+        --------
+        res : Tensor (b, d, d)
+            Metric tensor
+            or Tensor (b, d) if is_diag is True
         """
         if not self.is_diag:
             return self.cometric_tensor(q).inverse()
@@ -194,15 +220,22 @@ class CoMetric(torch.nn.Module):
             return 1 / self.cometric_tensor(q)
 
     def dot(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
-        """Computes u^T G(q) v for a batch of points q at tangent vectors u and v
+        """
+        Computes u^T G(q) v for a batch of points q at tangent vectors u and v
 
-        Params:
-        q : Tensor (b,d) batch of points
-        u : Tensor (b,d) first tangent vector
-        v : Tensor (b,d) second tangent vector
+        Parameters:
+        -----------
+        q : Tensor (b, d)
+            Batch of points
+        u : Tensor (b, d)
+            First tangent vector
+        v : Tensor (b, d)
+            Second tangent vector
 
-        Output:
-        res : Tensor (b,) u^T G(q) v
+        Returns:
+        -----------
+        res : Tensor (b,)
+            u^T G(q) v
         """
         G = self.metric_tensor(q)
         if not self.is_diag:
@@ -211,15 +244,21 @@ class CoMetric(torch.nn.Module):
             return torch.sum(u * G * v, dim=1)
 
     def inv_dot(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
-        """Computes u^T G_inv(q) v for a batch of points q at tangent vectors u and v
+        """
+        Computes u^T G_inv(q) v for a batch of points q at tangent vectors u and v
 
-        Params:
-        q : Tensor (b,d) batch of points
-        u : Tensor (b,d) first tangent vector
-        v : Tensor (b,d) second tangent vector
+        Parameters:
+        q : Tensor (b,d)
+            Batch of points
+        u : Tensor (b,d)
+            First tangent vector
+        v : Tensor (b,d)
+            Second tangent vector
 
-        Output:
-        res : Tensor (b,) u^T G_inv(q) v
+        Returns:
+        -------
+        res : Tensor (b,)
+            u^T G_inv(q) v
         """
         G_inv = self.cometric_tensor(q)
         if self.is_diag:
@@ -230,36 +269,50 @@ class CoMetric(torch.nn.Module):
     def metric(self, q: Tensor, p: Tensor) -> Tensor:
         """Computes p^TG(q)p for a batch of tangent vectors p at points q
 
-        Params:
-        q : Tensor (b,d) batch of points
-        p : Tensor (b,d) batch of tangent vectors
+        Parameters:
+        ----------
+        q : Tensor (b, d)
+            Batch of points
+        p : Tensor (b, d)
+            Batch of tangent vectors
 
-        Output:
-        res : Tensor (b,) p^TG(q)p
+        Returns:
+        -------
+        res : Tensor (b,)
+            p^TG(q)p
         """
         return self.dot(q, p, p)
 
     def cometric(self, q: Tensor, v: Tensor) -> Tensor:
-        """Computes v^T G_inv(q) v for a batch of points q at momenta v
+        """
+        Computes v^T G_inv(q) v for a batch of points q at momenta v
 
-        Params:
-        q : Tensor (b,d) batch of points
-        v : Tensor (b,d) batch of momenta
-
-        Output:
-        res : Tensor (b,) v^T G_inv(q) v
+        Parameters:
+        ----------
+        q : Tensor (b, d)
+            Batch of points
+        v : Tensor (b, d)
+            Batch of momenta
+        Returns:
+        -------
+        res : Tensor (b,)
+            v^T G_inv(q) v
         """
         return self.inv_dot(q, v, v)
 
     def forward(self, q: Tensor) -> Tensor:
         """Computes G^-1(q) for a batch of points q
 
-        Params:
-        q : Tensor (b,d) batch of points
+        Parameters:
+        ----------
+        q : Tensor (b, d)
+            Batch of points
 
-        Output:
-        res : Tensor (b,d,d) inverse metric tensor
-            or Tensor (b,d) if is_diag is True
+        Returns:
+        -------
+        res : Tensor (b, d, d)
+            Inverse metric tensor
+            or Tensor (b, d) if is_diag is True
         """
         raise NotImplementedError
 
@@ -267,13 +320,19 @@ class CoMetric(torch.nn.Module):
         """
         Computes the angle between two vectors u and v at a point q.
 
-        Params:
-        q : Tensor (b,d) batch of points
-        u : Tensor (b,d) first tangent vector
-        v : Tensor (b,d) second tangent vector
+        Parameters:
+        ----------
+        q : Tensor (b, d)
+            Batch of points
+        u : Tensor (b, d)
+            First tangent vector
+        v : Tensor (b, d)
+            Second tangent vector
 
-        Output:
-        angle : Tensor (b,) angle between u and v at q
+        Returns:
+        -------
+        angle : Tensor (b,)
+            Angle between u and v at q
         """
         eps = 1e-8  # small value to avoid division by zero
         u_norm = self.metric(q, u).sqrt()
@@ -284,31 +343,36 @@ class CoMetric(torch.nn.Module):
         angle = torch.acos(cos_angle)
         return angle
 
-    def __add__(self, other):
+    def __add__(self, other: object) -> object:
         if isinstance(other, CoMetric):
             return SumOfCometric(self, other)
         else:
             raise ValueError(f"Cannot add {type(other)} to CoMetric")
 
-    def __mul__(self, other):
+    def __mul__(self, other: object) -> object:
         if isinstance(other, (int, float)):
             return ScaledCometric(self, other)
         else:
             raise ValueError(f"Cannot multiply {type(other)} to CoMetric")
 
-    def __rmul__(self, other):
+    def __rmul__(self, other: object) -> object:
         return self.__mul__(other)
 
     def eye(self, x):
-        """Helper function to create a batch of identity matrices on
+        """
+        Helper function to create a batch of identity matrices on
         the proper device and with the proper dtype
 
-        Params:
-        x : Tensor (b,d) batch of points
+        Parameters:
+        ----------
+        x : Tensor (b, d)
+            Batch of points
 
-        Output:
-        id : Tensor (b,d,d) batch of identity matrices
-            or (b,d) if is_diag is True
+        Returns:
+        -------
+        id : Tensor (b, d, d)
+            Batch of identity matrices
+            or (b, d) if is_diag is True
         """
         B, dim = x.shape
         if self.is_diag:
@@ -323,8 +387,8 @@ class SumOfCometric(CoMetric):
     """
     Sum of two cometrics.
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     cometric1: CoMetric
         First cometric tensor
     cometric2: CoMetric
@@ -343,7 +407,7 @@ class SumOfCometric(CoMetric):
         else:
             self.is_diag = False
 
-    def forward(self, q: torch.Tensor):
+    def forward(self, q: Tensor) -> Tensor:
         G_1 = self.cometric1.cometric_tensor(q)
         G_2 = self.cometric2.cometric_tensor(q)
         if not self.cometric1.is_diag and self.cometric2.is_diag:
@@ -360,8 +424,8 @@ class ScaledCometric(CoMetric):
     Cometric that is a scaled version of another cometric.
     The new metric is G'(q) = 1/scale * G(q) where G(q) is the metric of the original cometric.
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     cometric : CoMetric
         The cometric to scale
     scale : float
@@ -385,10 +449,13 @@ class ScaledCometric(CoMetric):
 
 
 class IdentityCoMetric(CoMetric):
-    """Cometric that is the (scaled) identity matrix
+    """
+    Cometric that is the (scaled) identity matrix
 
-    Params:
-    coscale : float, scaling factor for the cometric. Set to 1 for the identity cometric
+    Parameters:
+    -----------
+    coscale : float
+        Scaling factor for the cometric. Set to 1 for the identity cometric
     """
 
     def __init__(self, coscale: float = 1, is_diag=True):
@@ -406,6 +473,17 @@ class IdentityCoMetric(CoMetric):
 
 
 class SoftAbsCometric(CoMetric):
+    """
+    Cometric that applies the SoftAbs regularisation to a base cometric.
+
+    Parameters:
+    -----------
+    base_cometric : CoMetric
+        The base cometric to regularise
+    alpha : float
+        Regularisation parameter for the SoftAbs
+    """
+
     def __init__(self, base_cometric: CoMetric, alpha: float = 1e3):
         super().__init__()
         if base_cometric.is_diag:
@@ -413,12 +491,12 @@ class SoftAbsCometric(CoMetric):
         self.base_cometric = base_cometric
         self.alpha = alpha
 
-    def metric_tensor(self, q):
+    def metric_tensor(self, q: Tensor) -> Tensor:
         g = self.base_cometric.metric_tensor(q)
         g_soft = SoftAbs(g, self.alpha)
         return g_soft
 
-    def forward(self, q):
+    def forward(self, q: Tensor) -> Tensor:
         g_soft = self.metric_tensor(q)
         return torch.linalg.inv(g_soft)
 
@@ -429,7 +507,10 @@ class SoftAbsCometric(CoMetric):
 
 
 class PointCarreCoMetric(CoMetric):
-    """Cometric that is the pointcarre matrix, ie 0.25 * diag({1-||x||^2}^2)"""
+    """
+    Cometric that is the pointcarre matrix, ie:
+    G(x) = 0.25 * diag({1-||x||^2}^2)
+    """
 
     def __init__(self):
         super().__init__()
@@ -456,27 +537,42 @@ class FunctionnalHeightMapCometric(CoMetric):
     The metric tensor is simply  g_ij = <d_i r, d_j r> for r=(x,y,f(x,y)) where f is the height map function.
     for i,j in {x,y,z}.
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     func : Callable
         The height map function such that z = func(x, y).
     reg : float
         Regularization parameter for the cometric tensor.
     """
 
-    def __init__(self, func, reg=0):
+    def __init__(self, func: callable, reg: float = 0):
         super().__init__()
         self.func = func
         self.reg = reg
         self.df_ = torch.func.jacrev(self.func, argnums=(0, 1))
 
-    def get_dx_dy(self, x: torch.Tensor, y: torch.Tensor):
+    def get_dx_dy(self, x: Tensor, y: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Computes the partial derivatives of the height map function at points (x, y).
+
+        Parameters:
+        x : Tensor (B,)
+            x-coordinates of the points
+        y : Tensor (B,)
+            y-coordinates of the points
+
+        Returns:
+        dx : Tensor (B,)
+            Partial derivative with respect to x
+        dy : Tensor (B,)
+            Partial derivative with respect to y
+        """
         dx, dy = self.df_(x, y)
         dx = dx.sum(dim=1)
         dy = dy.sum(dim=1)
         return dx, dy
 
-    def metric_tensor(self, q):
+    def metric_tensor(self, q: Tensor) -> Tensor:
         x, y = q.T
         df_dx, df_dy = self.get_dx_dy(x, y)
 
@@ -490,7 +586,7 @@ class FunctionnalHeightMapCometric(CoMetric):
         g += self.reg * self.eye(q)
         return g
 
-    def forward(self, q):
+    def forward(self, q: Tensor) -> Tensor:
         g = self.metric_tensor(q)
         g_inv = torch.linalg.inv(g)
         return g_inv
@@ -502,8 +598,8 @@ class PullBackCometric(CoMetric):
     If J_f is the jacobian of the diffeomorphism f and G the base metric on the target manifold, the metric is given by:
     g(x) = J_f(x)^T @ G(f(x)) @ J_f(x)
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     diffeo: torch.nn.Module
         Neural network model. It should have signature (B,d) -> (B,...) (ie flattened input)
     base_cometric: CoMetric
@@ -532,7 +628,6 @@ class PullBackCometric(CoMetric):
         reg_coef: float = 1e-3,
         method: str = "finite_difference",
         chunk_size: int = 4,
-        # vmap_ok: bool = False,
         eps: float = 1e-4,
     ):
         super().__init__()
@@ -562,18 +657,18 @@ class PullBackCometric(CoMetric):
             raise ValueError(f"Invalid method {method}. Valid methods are {valid_methods}")
 
     @torch.enable_grad()
-    def jacobian_autograd(self, x):
+    def jacobian_autograd(self, x: Tensor) -> Tensor:
         """
         Computes the jacobian of the diffeomorphism at the points x using autograd.
 
         Parameters:
         -----------
-        x: (B, d)
+        x: Tensor (B, d)
             Batch of points where to compute the pullback metric
 
         Returns:
         --------
-        jacobian : torch.Tensor (B,d_out,d)
+        jacobian : Tensor (B,d_out,d)
             Batch of jacobians
         """
         x.requires_grad_(True)
@@ -590,14 +685,14 @@ class PullBackCometric(CoMetric):
                 x,
                 retain_graph=(i < hw - 1),
                 create_graph=False,
-                # change this line if higher order derivatives are needed 
+                # change this line if higher order derivatives are needed
                 # eg christoffel symbols
                 # tips : it will crash of OOM. good luck
             )[0]
             J[:, i, :] = grad_i
         return J
 
-    def jacobian_finite_difference(self, x):
+    def jacobian_finite_difference(self, x: Tensor) -> Tensor:
         """
         Computes the jacobian of the diffeomorphism at the points x using finite differences.
         More precisely , for each point x_i in the batch, and each dimension j,
@@ -605,14 +700,14 @@ class PullBackCometric(CoMetric):
         J_ij = (f(x_i + h e_j) - f(x_i - h e_j)) / (2h)
         where e_j is the j-th standard basis vector and h is a small constant.
 
-        Parameters
-        ----------
-        x : torch.Tensor (B,d)
+        Parameters:
+        -----------
+        x : Tensor (B,d)
             Batch of points where to compute the jacobian
 
-        Returns
-        -------
-        jacobian : torch.Tensor (B,d_out,d)
+        Returns:
+        --------
+        jacobian : Tensor (B,d_out,d)
             Batch of jacobians
         """
         B, d = x.shape
@@ -634,18 +729,18 @@ class PullBackCometric(CoMetric):
         return J
 
     @torch.enable_grad()
-    def jacobian_loop(self, x: torch.Tensor):
+    def jacobian_loop(self, x: Tensor) -> Tensor:
         """
         Computes the jacobian of the diffeomorphism at the points x using a for loop.
 
-        Parameters
+        Parameters:
         ----------
-        x : torch.Tensor (B,d)
+        x : Tensor (B,d)
             Batch of points where to compute the jacobian
 
-        Returns
-        -------
-        jacobian : torch.Tensor (B,d_out,d)
+        Returns:
+        --------
+        jacobian : Tensor (B,d_out,d)
             Batch of jacobians
         """
         jacobian = []
@@ -655,7 +750,7 @@ class PullBackCometric(CoMetric):
         jacobian = torch.stack(jacobian, dim=0)
         return jacobian
 
-    def metric_tensor(self, q: torch.Tensor):
+    def metric_tensor(self, q: Tensor) -> Tensor:
         jacobian = self.jacobian(q)
         if not isinstance(self.base_cometric, IdentityCoMetric):
             g_base = self.base_cometric.metric_tensor(self.diffeo(q))
@@ -665,11 +760,11 @@ class PullBackCometric(CoMetric):
         g = g + self.reg_coef * self.eye(q)
         return g
 
-    def forward(self, q: torch.Tensor):
+    def forward(self, q: Tensor) -> Tensor:
         g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
-    def dot(self, q, u, v):
+    def dot(self, q: Tensor, u: Tensor, v: Tensor) -> Tensor:
         flat_forward = lambda x: self.diffeo(x).flatten(start_dim=1)
         Jqu = torch.func.jvp(flat_forward, (q,), (u,))[1]
         Jqv = torch.func.jvp(flat_forward, (q,), (v,))[1]
@@ -691,8 +786,8 @@ class LiftedCometric(CoMetric):
     This will encourage geodesics to stay on the level sets of h. The metric is given by:
     g'(x) = g(x) + beta * grad(h(x)) @ grad(h(x))^T
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     base_cometric: CoMetric
         The original metric tensor
     h: torch.nn.Module
@@ -712,7 +807,7 @@ class LiftedCometric(CoMetric):
             reg_coef=0,
         )
 
-    def metric_tensor(self, q: torch.Tensor):
+    def metric_tensor(self, q: Tensor) -> Tensor:
         g_base = self.base_cometric.metric_tensor(q)
         if self.base_cometric.is_diag:
             g_base = torch.diag_embed(g_base)
@@ -720,7 +815,7 @@ class LiftedCometric(CoMetric):
         g = g_base + self.beta * g_h
         return g
 
-    def forward(self, q):
+    def forward(self, q: Tensor) -> Tensor:
         g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
@@ -777,46 +872,46 @@ class FisherRaoCometric(CoMetric):
 
         Parameters
         ----------
-        x : torch.Tensor (d,)
+        x : Tensor (d,)
             Data point
-        theta : torch.Tensor (p,)
+        theta : Tensor (p,)
             Parameter of the distribution
         """
         return self.log_likelihood(x.unsqueeze(0), theta).squeeze(0)
 
-    def hessian_no_batch_all(self, x: torch.Tensor, theta: torch.Tensor):
+    def hessian_no_batch_all(self, x: Tensor, theta: Tensor):
         """
         Computes the hessian of the log-likelihood function at a single data point x.
 
         Parameters
         ----------
-        x : torch.Tensor (d,)
+        x : Tensor (d,)
             Data point
-        theta : torch.Tensor (p,)
+        theta : Tensor (p,)
             Parameter of the distribution
 
         Returns
         -------
-        hess : torch.Tensor (p,p)
+        hess : Tensor (p,p)
             Hessian of the log-likelihood function at x
         """
         hess = torch.func.hessian(self.log_no_batch, argnums=1)(x, theta)
         return hess
 
-    def hessian_no_batch_param(self, x: torch.Tensor, theta):
+    def hessian_no_batch_param(self, x: Tensor, theta):
         """
         Computes the hessian of the log-likelihood function at a batch of data points x.
 
         Parameters
         ----------
-        x : torch.Tensor (B,d)
+        x : Tensor (B,d)
             Batch of data points
-        theta : torch.Tensor (p,)
+        theta : Tensor (p,)
             Parameter of the distribution
 
         Returns
         -------
-        hess : torch.Tensor (B,p,p)
+        hess : Tensor (B,p,p)
             Batch of Hessians of the log-likelihood function at x
         """
         B, d = x.shape
@@ -827,7 +922,7 @@ class FisherRaoCometric(CoMetric):
         hess = torch.stack(hess, dim=0)
         return hess
 
-    def normal_sampling(self, N_pts: int, theta: torch.Tensor):
+    def normal_sampling(self, N_pts: int, theta: Tensor):
         d = theta.shape[1]
         return torch.randn(N_pts, d, device=theta.device, dtype=theta.dtype)
 
@@ -840,12 +935,12 @@ class FisherRaoCometric(CoMetric):
 
         Parameters
         ----------
-        theta : torch.Tensor (B,p)
+        theta : Tensor (B,p)
             Batch of parameters of the distribution
 
         Returns
         -------
-        fim : torch.Tensor (B,p,p)
+        fim : Tensor (B,p,p)
             Batch of empirical fisher information matrices at theta
         """
         x = self.data_sampler(self.N_pts, theta)
@@ -858,14 +953,14 @@ class FisherRaoCometric(CoMetric):
         fim = -hess.mean(dim=1)  # (B,p,p)
         return fim
 
-    def metric_tensor(self, theta: torch.Tensor):
+    def metric_tensor(self, theta: Tensor):
         g = self.inf_matrix(theta)
         if self.softabs_alpha is not None:
             g = SoftAbs(g, alpha=self.softabs_alpha)
         g += self.reg_coef * self.eye(theta)
         return g
 
-    def forward(self, q: torch.Tensor):
+    def forward(self, q: Tensor):
         g = self.metric_tensor(q)
         return torch.linalg.inv(g)
 
@@ -877,11 +972,11 @@ class CentroidsCometric(CoMetric):
     """Cometric based on the cometric computed on centroids.
     New cometric is computed as a gaussian interpolation of the cometric at the centroids.
 
-    Parameters
-    ----------
-    centroids : torch.Tensor (K,d)
+    Parameters:
+    -----------
+    centroids : Tensor (K,d)
         The centroids of the clusters
-    cometric_centroids: torch.Tensor (K,d,d)
+    cometric_centroids: Tensor (K,d,d)
         The cometric tensor at the centroids
     temperature : float
         The temperature of the gaussian kernel. It controls the smoothness of the interpolation.
@@ -916,9 +1011,9 @@ class CentroidsCometric(CoMetric):
             self.register_buffer("centroids", centroids)
         if cometric_centroids is not None:
             self.register_buffer("cometric_centroids", cometric_centroids)
-        self.register_buffer("temperature", torch.tensor(temperature))
-        self.register_buffer("reg_coef", torch.tensor(reg_coef))
-        self.register_buffer("temperature_scale", torch.tensor(temperature_scale))
+        self.register_buffer("temperature", Tensor(temperature))
+        self.register_buffer("reg_coef", Tensor(reg_coef))
+        self.register_buffer("temperature_scale", Tensor(temperature_scale))
 
         if K is not None and centroids is not None:
             self.process_centroids(K)
@@ -933,8 +1028,20 @@ class CentroidsCometric(CoMetric):
             )
         self.metric_weight = metric_weight
 
-    def assess_cometric_tensor_symmetry(self, cometric_centroids: Tensor) -> bool:
-        """Check if the cometric tensor is symmetric positive semi-definite."""
+    def assess_cometric_tensor_symmetry(self, cometric_centroids: Tensor) -> Tensor:
+        """
+        Check if the cometric tensor is symmetric positive semi-definite.
+
+        Parameters:
+        -----------
+        cometric_centroids : Tensor (K,d,d) or (K,d)
+            The cometric tensor at the centroids
+
+        Returns:
+        -----------
+        Tensor (K,d,d) or (K,d)
+            The (possibly symmetrized) cometric tensor at the centroids
+        """
         assert cometric_centroids.ndim in [
             2,
             3,
@@ -960,7 +1067,14 @@ class CentroidsCometric(CoMetric):
             cometric_centroids = (cometric_centroids + cometric_centroids.mT) / 2
         return cometric_centroids
 
-    def process_centroids(self, K: int):
+    def process_centroids(self, K: int) -> None:
+        """
+        Process the centroids to select K representative centroids using K-Medoids clustering.
+
+        Parameters:
+        K : int
+            The number of centroids to select. If K=-1, use all centroids.
+        """
         if K <= self.centroids.shape[0] and K > 0:
             self.K = K
             dst_mat = torch.cdist(self.centroids, self.centroids, p=2).sqrt().cpu().numpy()
@@ -981,7 +1095,10 @@ class CentroidsCometric(CoMetric):
             self.K = self.centroids.shape[0]
         self.set_temperature()
 
-    def set_temperature(self):
+    def set_temperature(self) -> None:
+        """
+        Set the temperature to the maximum minimum distance between centroids scaled by temperature_scale.
+        """
         dst_mat = torch.cdist(self.centroids, self.centroids, p=2)
         dst_mat[dst_mat == 0] = float("inf")  # Avoid zero self distances
         # min_distances, _ = dst_mat.min(dim=1)
@@ -991,7 +1108,19 @@ class CentroidsCometric(CoMetric):
         second_min_distances = sorted_distances[:, 1]
         self.temperature = self.temperature_scale * second_min_distances.max()
 
-    def load_state_dict(self, state_dict, strict=True, assign=False):
+    def load_state_dict(self, state_dict: dict, strict=True, assign=False) -> None:
+        """
+        Load the state dict of the model.
+
+        Parameters:
+        state_dict : dict
+            State dict to load
+        strict : bool
+            Whether to strictly enforce that the keys in state_dict match the keys returned by this module's state_dict() function.
+        assign : bool
+            Whether to assign the values in state_dict to the model's parameters.
+        """
+
         # Just to accomodate loading a state_dict with centroids and cometric_centroids
         if "centroids" in state_dict and not hasattr(self, "centroids"):
             self.register_buffer("centroids", state_dict["centroids"])
@@ -1054,13 +1183,18 @@ class DiagonalCometricModel(CoMetric):
     Otherwise, the diagonal values are different.
 
     Parameters:
-    in_dim : int, dimension of the input features
-    hidden_dim : int, dimension of the hidden layer
-    latent_dim : int, dimension of the latent space
-    lbd : float, regularization parameter
+    -----------
+    in_dim : int
+        Dimension of the input features
+    hidden_dim : int
+        Dimension of the hidden layer
+    latent_dim : int
+        Dimension of the latent space
+    lbd : float
+        Regularization parameter
     """
 
-    def __init__(self, in_dim, hidden_dim, latent_dim, lbd=1):
+    def __init__(self, in_dim: int, hidden_dim: int, latent_dim: int, lbd: float = 1):
         super().__init__(is_diag=True)
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
@@ -1107,13 +1241,18 @@ class CometricModel(CoMetric):
     The parametrization here uses the Cholesky decomposition of the cometric tensor.
 
     Parameters:
-    input_dim : int, dimension of the input features
-    hidden_dim : int, dimension of the hidden layer
-    latent_dim : int, dimension of the latent space
-    lbd : float, regularization parameter
+    -----------
+    input_dim : int
+        Dimension of the input features
+    hidden_dim : int
+        Dimension of the hidden layer
+    latent_dim : int
+        Dimension of the latent space
+    lbd : float
+        Regularization parameter
     """
 
-    def __init__(self, input_dim, hidden_dim, latent_dim, lbd=0.1):
+    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int, lbd: float = 0.1):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
@@ -1146,7 +1285,7 @@ class CometricModel(CoMetric):
         nn.init.zeros_(self.lower.weight)
         nn.init.zeros_(self.lower.bias)
 
-    def forward(self, features):
+    def forward(self, features: Tensor) -> Tensor:
         x = self.layers(features)
         log_diag = self.diag(x)
         lower = self.lower(x)
@@ -1171,8 +1310,9 @@ class SmallConvCometricModel(CoMetric):
     """
     Simple convolutional metric backbone
     It expects to receive square image of shape (B, C, W, W) where
-    Params:
-    -------
+
+    Parameters:
+    -----------
     latent_dim : int
         Dimension of the latent space
     n_channels : int
@@ -1183,12 +1323,14 @@ class SmallConvCometricModel(CoMetric):
         Regularization parameter to avoid singularities in the metric tensor
 
     Returns:
-    -------
+    --------
     G_inv : Tensor (B, latent_dim, latent_dim)
         The inverse of the metric tensor for the input images
     """
 
-    def __init__(self, latent_dim: int, n_channels=1, width=64, lbd=1e-10):
+    def __init__(
+        self, latent_dim: int, n_channels: int = 1, width: int = 64, lbd: float = 1e-10
+    ):
         super().__init__()
 
         self.latent_dim = latent_dim
@@ -1231,12 +1373,23 @@ class SmallConvCometricModel(CoMetric):
             self.l3,
         )
 
-    def get_out_conv_dim_(self, W_in, pad, ker_size, stride) -> int:
+    def get_out_conv_dim_(self, W_in: int, pad: int, ker_size: int, stride: int) -> int:
         """
         Returns the output dimension of the conv layers
+
+        Parameters:
+        -----------
+        W_in : int
+            Input width
+        pad : int
+            Padding
+        ker_size : int
+            Kernel size
+        stride : int
+            Stride
         """
         W_out = (W_in + 2 * pad - ker_size) / stride + 1
-        return torch.floor(torch.Tensor([W_out])).int()
+        return torch.floor(Tensor([W_out])).int()
 
     def get_dim_out_(self) -> int:
         """
@@ -1266,7 +1419,21 @@ class SmallConvCometricModel(CoMetric):
 
 
 class Cometric_MLP(CoMetric):
-    def __init__(self, input_dim, latent_dim: int, lbd=0.01):
+    """
+    A cometric model based on a simple MLP architecture.
+    The cometric tensor is parametrized via its Cholesky decomposition.
+
+    Parameters:
+    -----------
+    input_dim : int or tuple[int, ...]
+        Dimension of the input features. If tuple, it is assumed to be the shape of an image.
+    latent_dim : int
+        Dimension of the latent space
+    lbd : float
+        Regularization parameter to avoid singularities in the metric tensor
+    """
+
+    def __init__(self, input_dim: int | tuple[int, ...], latent_dim: int, lbd: float = 0.01):
         super().__init__()
 
         self.input_dim = np.prod(input_dim) if isinstance(input_dim, tuple) else input_dim
@@ -1278,7 +1445,7 @@ class Cometric_MLP(CoMetric):
         k = int(self.latent_dim * (self.latent_dim - 1) / 2)
         self.lower = nn.Linear(400, k)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
 
         h1 = self.layers(x.reshape(-1, self.input_dim))
         h21, h22 = self.diag(h1), self.lower(h1)
@@ -1309,18 +1476,42 @@ class FinslerMetric(nn.Module):
     def __init__(self):
         super(FinslerMetric, self).__init__()
 
-    def forward(self, x: Tensor, v: Tensor):
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
         """
         Compute the Finsler metric at point x in the direction v.
+
+        Parameters:
+        -----------
+        x : Tensor (b,d)
+            Points in the manifold
+        v : Tensor (b,d)
+            Tangent vectors at x
+
+        Returns:
+        --------
+        F : Tensor (b,)
+            Finsler metric values at (x,v)
         """
         raise NotImplementedError("FinslerMetric is an abstract class")
 
-    def fundamental_tensor(self, x: Tensor, v: Tensor):
+    def fundamental_tensor(self, x: Tensor, v: Tensor) -> Tensor:
         """
         Compute the fundamental tensor of the Finsler metric at point x in the direction v.
+
+        Parameters:
+        -----------
+        x : Tensor (b,d)
+            Points in the manifold
+        v : Tensor (b,d)
+            Tangent vectors at x
+
+        Returns:
+        --------
+        G : Tensor (b,d,d)
+            Fundamental tensor of the Finsler metric at (x,v)
         """
 
-        def g(x1, v2):
+        def g(x1: Tensor, v2: Tensor) -> Tensor:
             F = lambda q, p: self.forward(q.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
             g_hessian = torch.func.hessian(lambda v1: 1 / 2 * F(x1, v1) ** 2)
             return g_hessian(v2)
@@ -1328,9 +1519,21 @@ class FinslerMetric(nn.Module):
         G = torch.vmap(g)
         return G(x, v)
 
-    def inverse_fundamental_tensor(self, x: Tensor, v: Tensor):
+    def inverse_fundamental_tensor(self, x: Tensor, v: Tensor) -> Tensor:
         """
         Compute the inverse of the fundamental tensor of the Finsler metric at point x in the direction v.
+
+        Parameters:
+        -----------
+        x : Tensor (b,d)
+            Points in the manifold
+        v : Tensor (b,d)
+            Tangent vectors at x
+
+        Returns:
+        --------
+        G_inv : Tensor (b,d,d)
+            Inverse of the fundamental tensor of the Finsler metric at (x,v)
         """
         G = self.fundamental_tensor(x, v)
         G_inv = torch.linalg.inv(G)
@@ -1339,8 +1542,14 @@ class FinslerMetric(nn.Module):
 
 class ToyFinslerMetric(FinslerMetric):
     """
+    Compute F(x,v) = 1/|v| * (1 + lbd^2 * |x|^2 + lbd^2 * <x,v>^2 / |v|^2)
     This is a valid metric see:
     https://doi.org/10.1016/j.aim.2005.06.007
+
+    Parameters:
+    -----------
+    lbd : float
+        Regularization parameter
     """
 
     def __init__(self, lbd: float = 1):
@@ -1348,7 +1557,7 @@ class ToyFinslerMetric(FinslerMetric):
         self.lbd = lbd
         self.lbd2 = lbd**2
 
-    def forward(self, x: Tensor, v: Tensor):
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
         x_norm = torch.linalg.vector_norm(x, dim=-1)
         v_norm = torch.linalg.vector_norm(v, dim=-1)
         xv = torch.einsum("bi,bi->b", x, v)
@@ -1363,8 +1572,8 @@ class MatsumotoMetrics(FinslerMetric):
     The 1-form must verify the condition that the resulting Matsumoto metric is positive.
     It is up to the user to ensure this condition is satisfied.
 
-    Parameters
-    ----------
+    Parameters:
+    -----------
     alpha_inv : CoMetric
         Base cometric to use for the Matsumoto metric.
     beta : nn.Module
@@ -1385,12 +1594,15 @@ class MatsumotoMetrics(FinslerMetric):
 
 class SlopeMetrics(FinslerMetric):
     """
+    Computes F(x,v)= alpha**2 / (alpha - beta)
+    where alpha and beta are given in "The geometry on the slope of a mountain"
+    see : http://arxiv.org/abs/1811.02123
     Slope metrics are Matsumoto metrics derived from
     a height map.
 
-    Parameters
-    ----------
-    f : func (N,2)-> (N,)
+    Parameters:
+    -----------
+    f : nn.Module (N,2)-> (N,)
         Function that takes in points on the manifold and outputs a scalar value.
         This function represents the height map. To define a valid metric,
         The partial derivatives of f are required to verify f_x^2 + f_y^2 < 1/3 everywhere.
@@ -1402,17 +1614,7 @@ class SlopeMetrics(FinslerMetric):
         self.f_no_batch = lambda x: self.f(x.unsqueeze(0)).squeeze(0)
         self.df_ = torch.vmap(torch.func.jacrev(self.f_no_batch))
 
-    def forward(self, x: Tensor, v: Tensor):
-        """Computes F(x,v)= alpha**2 / (alpha - beta)
-        where alpha and beta are given in "The geometry on the slope of a mountain"
-        see : http://arxiv.org/abs/1811.02123
-        Parameters
-        ----------
-        x : torch.Tensor (b,2)
-            Points in the manifold. Must have x.requires_grad=True
-        v : torch.Tensor (b,2)
-            Tangent vectors at x
-        """
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
         df = self.df_(x)
         df_dx, df_dy = df[:, 0], df[:, 1]
 
@@ -1427,7 +1629,9 @@ class SlopeMetrics(FinslerMetric):
 
 
 class RandersMetrics(FinslerMetric):
-    """Randers metrics with a fixed base metric and a variable 1-form.
+    """
+    Compute F(x,v) = |v|_{G} + beta *  omega(x) . v
+    Randers metrics with a fixed base metric and a variable 1-form.
 
     The 1-form must verify the condition that the resulting Randers metric is positive.
     It is up to the user to ensure this condition is satisfied.
@@ -1460,21 +1664,7 @@ class RandersMetrics(FinslerMetric):
         self.beta = beta
         self.use_grad_g = use_grad_g
 
-    def forward(self, x: Tensor, v: Tensor):
-        """Compute F(x,v) = |v|_{G} + beta *  omega(x) . v
-
-        Parameters
-        ----------
-        x : torch.Tensor (b,d)
-            Points in the manifold
-        v : torch.Tensor (b,d)
-            Tangent vectors at x
-
-        Returns
-        -------
-        F : torch.Tensor (b,)
-            Randers metric at x in the direction of v
-        """
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
         x_norm = self.base_cometric.metric(x, v).sqrt()
         omega_x = self.omega(x)
         omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
@@ -1482,7 +1672,22 @@ class RandersMetrics(FinslerMetric):
         F = x_norm + self.beta * omega_x_v
         return F
 
-    def fund_tensor_analytic_(self, z: Tensor, v: Tensor):
+    def fund_tensor_analytic_(self, z: Tensor, v: Tensor)-> Tensor:
+        """
+        Computes the fundamental tensor of the Randers metric using the analytic formula.
+
+        Parameters:
+        ----------
+        z : Tensor (b,d)
+            Points in the manifold
+        v : Tensor (b,d)
+            Tangent vectors at z
+
+        Returns:
+        -------
+        g : Tensor (b,d,d)
+            Fundamental tensor of the Randers metric at z in the direction of v
+        """
         F_z_v = self.forward(z, v)
         v_norm = self.base_cometric.metric(z, v).sqrt()
         b = self.beta * self.omega(z)
@@ -1508,11 +1713,25 @@ class RandersMetrics(FinslerMetric):
 
         return g
 
-    def inv_fund_tensor_analytic_(self, q: Tensor, v: Tensor):
+    #@TODO: It doesn't work, use autograd instead. Fix this
+    def inv_fund_tensor_analytic_(self, q: Tensor, v: Tensor) -> Tensor:
         """
+        Computes the inverse of the fundamental tensor of the Randers metric using the analytic formula.
         Lemma 6.14 from 'Comparison Finsler Geometry' by Ohta
 
         It doesn't work, use autograd instead
+
+        Parameters:
+        ----------  
+        q : Tensor (b,d)
+            Points in the manifold
+        v : Tensor (b,d)
+            Tangent vectors at q
+
+        Returns:
+        -------
+        g_inv : Tensor (b,d,d)
+            Inverse of the fundamental tensor of the Randers metric at q in the direction of v
         """
         a_inv = self.base_cometric.cometric_tensor(q)
         v_norm = self.base_cometric.metric(q, v).sqrt()
@@ -1543,7 +1762,7 @@ class RandersMetrics(FinslerMetric):
         g_inv -= (v_norm / F**2)[:, None, None] * (bv + vb)
         return g_inv
 
-    def fundamental_tensor(self, x: Tensor, v: Tensor):
+    def fundamental_tensor(self, x: Tensor, v: Tensor) -> Tensor:
         """
         Computes the fundamental tensor of the Randers metric
         at the point x in the direction v.
@@ -1551,14 +1770,14 @@ class RandersMetrics(FinslerMetric):
 
         Parameters:
         ----------
-        x : torch.Tensor (b,d)
+        x : Tensor (b,d)
             Points in the manifold
-        v : torch.Tensor (b,d)
+        v : Tensor (b,d)
             Tangent vectors at x
 
         Returns:
         -------
-        g : torch.Tensor (b,d,d)
+        g : Tensor (b,d,d)
             Fundamental tensor of the Randers metric at x in the direction of v
         """
         if self.use_grad_g:
@@ -1566,7 +1785,7 @@ class RandersMetrics(FinslerMetric):
         else:
             return self.fund_tensor_analytic_(x, v)
 
-    def inverse_fundamental_tensor(self, x: Tensor, v: Tensor):
+    def inverse_fundamental_tensor(self, x: Tensor, v: Tensor) -> Tensor:
         """
         Computes the inverse of the fundamental tensor of the Randers metric
         at the point x in the direction v.
@@ -1574,14 +1793,14 @@ class RandersMetrics(FinslerMetric):
 
         Parameters:
         ----------
-        x : torch.Tensor (b,d)
+        x : Tensor (b,d)
             Points in the manifold
-        v : torch.Tensor (b,d)
+        v : Tensor (b,d)
             Tangent vectors at x
 
         Returns:
         -------
-        g_inv : torch.Tensor (b,d,d)
+        g_inv : Tensor (b,d,d)
             Inverse of the fundamental tensor of the Randers metric at x in the direction of v
         """
         return super().inverse_fundamental_tensor(x, v)
