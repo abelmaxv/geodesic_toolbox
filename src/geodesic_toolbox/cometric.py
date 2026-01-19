@@ -1106,7 +1106,7 @@ class CentroidsCometric(CoMetric):
         # Find distance to second closest centroid
         sorted_distances, _ = torch.sort(dst_mat, dim=1)
         second_min_distances = sorted_distances[:, 1]
-        self.temperature = self.temperature_scale * second_min_distances.max()
+        self.temperature = self.temperature_scale.to(self.centroids.device) * second_min_distances.max()
 
     def load_state_dict(self, state_dict: dict, strict=True, assign=False) -> None:
         """
