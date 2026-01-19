@@ -1106,7 +1106,9 @@ class CentroidsCometric(CoMetric):
         # Find distance to second closest centroid
         sorted_distances, _ = torch.sort(dst_mat, dim=1)
         second_min_distances = sorted_distances[:, 1]
-        self.temperature = self.temperature_scale.to(self.centroids.device) * second_min_distances.max()
+        self.temperature = (
+            self.temperature_scale.to(self.centroids.device) * second_min_distances.max()
+        )
 
     def load_state_dict(self, state_dict: dict, strict=True, assign=False) -> None:
         """
@@ -1646,8 +1648,6 @@ class RandersMetrics(FinslerMetric):
     beta : float
         Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1]. W
         When beta=0, the Randers metric reduces to the base cometric.
-    use_grad_g : bool
-        If True, the fundamental tensor is computed using autograd. Else, it is computed using the formula.
     """
 
     def __init__(
@@ -1655,14 +1655,12 @@ class RandersMetrics(FinslerMetric):
         base_cometric: CoMetric,
         omega: nn.Module,
         beta: float = 1.0,
-        use_grad_g: bool = False,
     ):
         super(RandersMetrics, self).__init__()
         self.base_cometric = base_cometric
         self.omega = omega
         assert 0 <= beta <= 1, "Beta must be in the range [0, 1]"
         self.beta = beta
-        self.use_grad_g = use_grad_g
 
     def forward(self, x: Tensor, v: Tensor) -> Tensor:
         x_norm = self.base_cometric.metric(x, v).sqrt()
@@ -1675,6 +1673,7 @@ class RandersMetrics(FinslerMetric):
     def fund_tensor_analytic_(self, z: Tensor, v: Tensor) -> Tensor:
         """
         Computes the fundamental tensor of the Randers metric using the analytic formula.
+        See Lemma 11.1.4 from 'An Introduction to Riemann-Finsler Geometry' by Bao, Chern, Shen.
 
         Parameters:
         ----------
@@ -1713,13 +1712,10 @@ class RandersMetrics(FinslerMetric):
 
         return g
 
-    # @TODO: It doesn't work, use autograd instead. Fix this
     def inv_fund_tensor_analytic_(self, q: Tensor, v: Tensor) -> Tensor:
         """
         Computes the inverse of the fundamental tensor of the Randers metric using the analytic formula.
-        Lemma 6.14 from 'Comparison Finsler Geometry' by Ohta
-
-        It doesn't work, use autograd instead
+        See Lemma 11.2.1 from 'An Introduction to Riemann-Finsler Geometry' by Bao, Chern, Shen.
 
         Parameters:
         ----------
@@ -1733,33 +1729,36 @@ class RandersMetrics(FinslerMetric):
         g_inv : Tensor (b,d,d)
             Inverse of the fundamental tensor of the Randers metric at q in the direction of v
         """
-        a_inv = self.base_cometric.cometric_tensor(q)
-        v_norm = self.base_cometric.metric(q, v).sqrt()
         F = self.forward(q, v)
+        alpha = self.base_cometric.metric(q, v).sqrt()
 
-        b_form = self.beta * self.omega(q)  # Use b_form instead of b
-        beta = torch.einsum("bi,bi->b", b_form, v)
-        beta_norm_sqr = self.base_cometric.metric(q, b_form)
-
-        vv = torch.einsum("bi,bj->bij", v, v)
-        bv = torch.einsum("bi,bj->bij", b_form, v)  # Use b_form here
-        vb = torch.einsum("bi,bj->bij", v, b_form)  # Use b_form here
-
-        batch_size, dim = b_form.shape[0], b_form.shape[1]  # Use different names
-        g_inv = torch.zeros(batch_size, dim, dim, dtype=q.dtype, device=q.device)
-
-        # First term
+        a = self.base_cometric.metric_tensor(q)
         if self.base_cometric.is_diag:
-            diag_idx = torch.arange(0, a_inv.shape[-1], device=a_inv.device)
-            g_inv[:, diag_idx, diag_idx] += (v_norm / F)[:, None] * a_inv
+            a_inv = torch.diag_embed(1.0 / a, dim1=-2, dim2=-1)
         else:
-            g_inv += (v_norm / F)[:, None, None] * a_inv
+            a_inv = a.inverse()
 
-        # Second term
-        g_inv += ((beta + beta_norm_sqr * v_norm) / F**3)[:, None, None] * vv
+        fst_term = (alpha / F)[:, None, None] * a_inv
 
-        # Third term
-        g_inv -= (v_norm / F**2)[:, None, None] * (bv + vb)
+        b = self.omega(q)
+        beta = self.beta * torch.einsum("bi,bi->b", b, v)
+        b_tilde_top = torch.einsum("bij,bj->bi", a_inv, b)
+        b_tilde_norm = torch.einsum("bi,bi->b", b_tilde_top, b)
+        l_tilde = v / alpha[:, None]
+
+        ll = torch.einsum("bi,bj->bij", l_tilde, l_tilde)
+        snd_term = (
+            (alpha**2 / F**3)[:, None, None]
+            * (beta + alpha * b_tilde_norm)[:, None, None]
+            * ll
+        )
+
+        li_bj = torch.einsum("bi,bj->bij", l_tilde, b_tilde_top)
+        lj_bi = torch.einsum("bj,bi->bij", l_tilde, b_tilde_top)
+
+        trd_term = (alpha**2 / F**2)[:, None, None] * (li_bj + lj_bi)
+
+        g_inv = fst_term + snd_term - trd_term
         return g_inv
 
     def fundamental_tensor(self, x: Tensor, v: Tensor) -> Tensor:
@@ -1780,10 +1779,7 @@ class RandersMetrics(FinslerMetric):
         g : Tensor (b,d,d)
             Fundamental tensor of the Randers metric at x in the direction of v
         """
-        if self.use_grad_g:
-            return super().fundamental_tensor(x, v)
-        else:
-            return self.fund_tensor_analytic_(x, v)
+        return self.fund_tensor_analytic_(x, v)
 
     def inverse_fundamental_tensor(self, x: Tensor, v: Tensor) -> Tensor:
         """
@@ -1803,6 +1799,4 @@ class RandersMetrics(FinslerMetric):
         g_inv : Tensor (b,d,d)
             Inverse of the fundamental tensor of the Randers metric at x in the direction of v
         """
-        return super().inverse_fundamental_tensor(x, v)
-        # else:
-        #     return self.inv_fund_tensor_analytic_(x, v)
+        return self.inv_fund_tensor_analytic_(x, v)
