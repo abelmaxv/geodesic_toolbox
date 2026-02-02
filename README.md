@@ -2,8 +2,7 @@
 
 <!-- [![PyPI version](https://img.shields.io/pypi/v/geodesic_toolbox.svg)](https://pypi.org/project/geodesic_toolbox/) -->
 [![Python 3.11+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
+[![License: CC BY-NC-ND 4.0](https://img.shields.io/badge/License-CC_BY--NC--ND_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-nd/4.0/)(LICENSE)
 
 ## Overview
 
