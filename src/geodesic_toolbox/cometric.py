@@ -1172,7 +1172,7 @@ class CentroidsCometric(CoMetric):
         return G_inv
 
     def extra_repr(self) -> str:
-        return f"K={self.K}, temperature={self.temperature:.3f}, temp_scale={self.temperature_scale} reg_coef={self.reg_coef:.3f}, metric_weight={self.metric_weight}, is_diag={self.is_diag}"
+        return f"K={self.K}, temperature={self.temperature.item():.3f}, temp_scale={self.temperature_scale.item()} reg_coef={self.reg_coef.item():.3f}, metric_weight={self.metric_weight}, is_diag={self.is_diag}"
 
 
 #################################################################
