@@ -747,6 +747,8 @@ class MMALA(Sampler):
 
     `Riemann manifold Langevin and Hamiltonian Monte Carlo methods` by Girolami and Calderhead 2011.
 
+    @TODO : I am pretty sure the implementation is plain wrong
+
     Parameters
     ----------
     cometric : CoMetric
@@ -794,7 +796,7 @@ class MMALA(Sampler):
         return -torch.log(self.p_target(z))
 
     def K(self, v: Tensor) -> Tensor:
-        g_inv = self.cometric(v)
+        g_inv = self.cometric(v)  # This is weird, no position involved ?
         det_g = 1 / g_inv.det()
         velocity = torch.einsum("bj,bij,bi->b", v, g_inv, v)
         return 0.5 * velocity + 0.5 * torch.log(det_g)
