@@ -1369,23 +1369,6 @@ class ExplicitRHMCSampler(Sampler):
 
         self.log2pi = torch.log(torch.tensor(2 * 3.1415927410125732))
 
-    def p_target(self, z: Tensor) -> Tensor:
-        """
-        Compute the target distribution p(z) = sqrt(det(g_inv(z)))
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        p(z) : Tensor (b,)
-            The target distribution.
-        """
-        g_inv = self.cometric(z)
-        return g_inv.det().abs().sqrt()
-
     def U(self, z: Tensor) -> Tensor:
         """
         Compute the potential energy U(z) = -log(sqrt(det(g_inv(z))))= -1/2 * log(det(g_inv(z)))
@@ -1399,8 +1382,7 @@ class ExplicitRHMCSampler(Sampler):
         -------
         potential energy : Tensor (b,)
         """
-        g_inv = self.cometric(z)
-        return -0.5 * torch.logdet(g_inv)
+        return -0.5 * self.cometric.inv_logdet(z)
 
     def K(self, v: Tensor, z: Tensor) -> Tensor:
         """
@@ -1418,9 +1400,8 @@ class ExplicitRHMCSampler(Sampler):
         -------
         kinetic energy : Tensor (b,)
         """
-        g_inv = self.cometric(z)
-        logdet_ginv = torch.logdet(g_inv)
-        velocity = torch.einsum("bj,bij,bi->b", v, g_inv, v)
+        logdet_ginv = self.cometric.inv_logdet(z)
+        velocity = self.cometric.cometric(z, v)
         return 0.5 * velocity - 0.5 * logdet_ginv + 0.5 * v.shape[1] * self.log2pi
 
     def H_base(self, z: Tensor, v: Tensor) -> Tensor:
@@ -1730,7 +1711,10 @@ class ExplicitRHMCSampler(Sampler):
         """
         g = self.cometric.metric_tensor(z)
         v = torch.randn_like(z)
-        v = torch.einsum("bij,bi->bj", mat_sqrt(g), v) * self.std_0
+        if self.cometric.is_diag:
+            v = v * g.sqrt() * self.std_0
+        else:
+            v = torch.einsum("bij,bi->bj", mat_sqrt(g), v) * self.std_0
         return v
 
     def sample(self, z_0: Tensor, return_traj=False, progress=False, return_acceptance=False):
