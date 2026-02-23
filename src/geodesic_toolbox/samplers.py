@@ -983,7 +983,7 @@ class ImplicitRHMCSampler(Sampler):
         -------
         kinetic energy : Tensor (b,)
         """
-        logdet_ginv = self.cometric.inv_logdet(v)
+        logdet_ginv = self.cometric.inv_logdet(q)
         velocity = self.cometric.cometric(q, v)
         return 0.5 * velocity - 0.5 * logdet_ginv + 0.5 * v.shape[1] * self.log2pi
 
