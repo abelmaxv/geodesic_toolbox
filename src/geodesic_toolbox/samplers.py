@@ -888,8 +888,6 @@ class ImplicitRHMCSampler(Sampler):
     It uses a tempering scheme on the momentum.
     Here the target distribution is defined by the volume element of the cometric.
 
-    @TODO: This implementation is not stable at all. Sometimes it diverges thus no samples are accepted.
-
     Parameters
     ----------
     cometric : CoMetric
@@ -912,6 +910,8 @@ class ImplicitRHMCSampler(Sampler):
         If True, it shows a progress bar.
     skip_acceptance : bool
         If True, the acceptance step is skipped. This can be used when differentiabily is needed.
+    threshold_fx : float
+        The threshold for the fixed point iterations. If the maximum change in the fixed point iterations is less than this threshold, the iterations are stopped.
     """
 
     def __init__(
@@ -921,7 +921,7 @@ class ImplicitRHMCSampler(Sampler):
         N_fx: int,
         gamma: float,
         N_run: int,
-        std_0: float = 0.1,
+        std_0: float = 1.0,
         bounds: float = 1e3,
         beta_0: float = 1,
         pbar: bool = False,
@@ -1310,7 +1310,6 @@ class ExplicitRHMCSampler(Sampler):
     `Introducing an Explicit Symplectic Integration Scheme for Riemannian Manifold Hamiltonian Monte Carlo`
     by Cobb et Baydin et al (2019).
 
-    @TODO: This implementation is not stable at all. Sometimes it diverges thus no samples are accepted.
     Parameters
     ----------
     cometric : CoMetric
@@ -1342,7 +1341,7 @@ class ExplicitRHMCSampler(Sampler):
         gamma: float,
         omega: float,
         N_run: int,
-        bounds: float,
+        bounds: float = 1e3,
         std_0: float = 1.0,
         beta_0: float = 1,
         pbar: bool = False,
