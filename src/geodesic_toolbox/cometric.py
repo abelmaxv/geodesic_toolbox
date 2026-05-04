@@ -1,5 +1,6 @@
 import torch
 from torch import Tensor
+from torch.special import erf
 import torch.nn as nn
 import weakref
 from sklearn.cluster import KMeans
@@ -2288,3 +2289,144 @@ class DualRandersMetrics(RandersMetrics):
         F_star = v_norm + omega_star_v  # (b,)
         reg_F_star = torch.sqrt(F_star**2 + self.epsilon**2)  # (b,)
         return reg_F_star
+
+def bump_fun(x : torch.Tensor) -> torch.Tensor : 
+    """ Smooth bump function whose support is ]-1, 1[ : 
+    Psi(x) = exp(1/(x^2 -1)) if x in ]-1, 1[ and 0 otherwise
+
+    Args:
+        x (torch.Tensor): (Batch of) arguments for the function of shape (N_batch, 1)
+
+    Returns:
+        torch.Tensor: (Batch of) outputs of shape (N_batch, 1)
+    """ 
+    inside = (x > -1) & (x < 1)
+    safe_exp = torch.exp(1 / (x**2 - 1))
+    return torch.where(inside, safe_exp, torch.zeros_like(x))
+
+
+class RingCometricBump(CoMetric):
+    """Implements the Riemannian metric described above on the ring manifold
+
+    Attibutes:
+        alpha (torch.Tensor): Half the width of the ring of shape (1,).
+
+        **Inherited Attributes:**
+       See :class:`CoMetric` for base CoMetric parameters 
+    """
+
+    def __init__(self, alpha : torch.Tensor):
+        super().__init__(is_diag = True)
+        assert alpha<1
+        self.alpha = alpha
+        
+
+    def forward(self, p : torch.Tensor) -> torch.Tensor : 
+        """Returns the cometric tensor by inverting the metric tensor
+
+        Args:
+            p (torch.Tensor):  (Batch of) points on the manifold of shape (N_batch, 2).
+
+        Returns:
+            torch.Tensor: (Batch of) cometric tensors of shape (N_batch, 2).
+        """
+        norm = torch.sqrt(torch.sum(p**2, dim = 1, keepdim = True))
+        bump_val = bump_fun((1-norm)/self.alpha)
+        diags = bump_val.expand(-1,2)
+        return 1/diags
+
+def rect_fun(x : torch.Tensor, sigma : torch.Tensor = torch.tensor([0.1]) ) -> torch.Tensor : 
+    """ Convolution between a rectangle function and a gaussian of standard deviation sigma
+
+    Args:
+        x (torch.Tensor): (Batch of) arguments for the function of shape (N_batch, 1)
+        sigma (torch.Tensor) : Standard deviation of the convolution of shape (1,)
+
+    Returns:
+        torch.Tensor: (Batch of) outputs of shape (N_batch, 1)
+    """ 
+    sqrt2 = torch.sqrt(torch.tensor([2]))
+    result = 0.5*(erf((x+1)/(sqrt2*sigma)) - erf((x-1)/(sqrt2*sigma)))
+    return result
+ 
+
+
+class RingCometricRect(CoMetric):
+    """Implements the Riemannian metric described above on the ring manifold
+
+    Attibutes:
+        alpha (torch.Tensor): Half the width of the ring of shape (1,).
+
+        **Inherited Attributes:**
+       See :class:`CoMetric` for base CoMetric parameters 
+        
+    """
+
+    def __init__(self, alpha : torch.Tensor):
+        super().__init__(is_diag = True)
+        assert alpha<1
+        self.alpha = alpha
+        
+
+    def forward(self, p : torch.Tensor) -> torch.Tensor : 
+        """Returns the cometric tensor by inverting the metric tensor
+
+        Args:
+            p (torch.Tensor):  (Batch of) points on the manifold of shape (N_batch, 2).
+
+        Returns:
+            torch.Tensor: (Batch of) cometric tensors of shape (N_batch, 2, 2).
+        """
+        norm = torch.sqrt(torch.sum(p**2, dim=1, keepdim=True))
+        bump_val = bump_fun((1 - norm) / self.alpha)
+        bump_val = bump_val.clamp(min=1e-3)   # prevents 1/0 outside the ring
+        diags = bump_val.expand(-1, 2)
+        return 1 / diags
+
+
+class OneForm_dtheta(torch.nn.Module):
+    """ Implements the normalized 1-form d theta in cartesian coordinate system.
+    """
+
+    def __init__(self, eta : float):
+        super().__init__()
+        self.eta = eta
+    
+    def forward(self, z : Tensor) -> Tensor :
+        """Returns the vector representation of the 1-form d theta at a given point. 
+        The 1-form is then computed with a dot product : 
+        omega_z(v) = <omega(z), p>_g
+
+        Args:
+            z (Tensor): (Batch of) points on the manifold of shape (N_batch, 2)
+
+        Returns:
+            Tensor: (Batch of) tangent vectors that represent the 1-form of shape (N_batch, 2)
+        """
+        norm2 = torch.sum(z**2, axis = 1)
+        norm = torch.sqrt(norm2)
+        covect = torch.zeros_like(z)
+        covect[:, 0] = -z[:,1]/norm
+        covect[:, 1] = z[:,0]/norm
+        return self.eta * covect
+
+
+class OneForm_zero(torch.nn.Module):
+    """ Implements the null 1-form 
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    
+    def forward(self, z : Tensor) -> Tensor :
+        """Returns the vector representation of the null 1-form at a given point.
+        The 1-form is identically zero everywhere, i.e. omega_z(v) = 0 for all z and v.
+
+        Args:
+            z (Tensor): (Batch of) points on the manifold of shape (N_batch, 2)
+
+        Returns:
+            Tensor: Zero covectors of shape (N_batch, 2)
+        """
+        return torch.zeros_like(z)
