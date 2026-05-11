@@ -1496,6 +1496,19 @@ class RBFCometric(CoMetric):
         return G_inv
 
 
+class MyCentroidsCometric(CentroidsCometric):
+    """
+    MyCentroidsCometric is a cometric that is the inverse of the cometric tensor at the centroids.
+    It is used to compute the inverse of the metric tensor at the centroids.
+    """
+
+    def forward(self, z: Tensor) -> Tensor:
+        G_inv = super().forward(z)
+        if self.is_diag:
+            return 1.0 / G_inv
+        return torch.linalg.inv(G_inv)
+
+
 #################################################################
 # Parametric cometrics
 #################################################################
@@ -2410,6 +2423,36 @@ class OneForm_dtheta(torch.nn.Module):
         covect[:, 1] = z[:,0]/norm
         return self.eta * covect
 
+class OneForm_dthetaRiemann(torch.nn.Module):
+    """ Implements the normalized 1-form d theta in cartesian coordinate system where normalization is with respect to Riemannian metric.
+    """
+
+    def __init__(self, cometric: CoMetric, eta: float = 1., eps: float = 1e-8):
+        super().__init__()
+        self.cometric = cometric
+        self.eta = eta        # was missing
+        self.eps = eps
+
+    
+    def forward(self, z : Tensor) -> Tensor :
+        """Returns the vector representation of the 1-form d theta at a given point. 
+        The 1-form is then computed with a dot product : 
+        omega_z(v) = <omega(z), p>_g
+
+        Args:
+            z (Tensor): (Batch of) points on the manifold of shape (N_batch, 2)
+
+        Returns:
+            Tensor: (Batch of) tangent vectors that represent the 1-form of shape (N_batch, 2)
+        """
+        covect = torch.zeros_like(z)
+        covect[:, 0] = -z[:, 1]
+        covect[:, 1] = z[:, 0]
+        sq_norm = self.cometric.cometric(z, covect)           # ‖covect‖²_{G⁻¹}
+        norm = sq_norm.sqrt()                                  # ‖covect‖_{G⁻¹}
+        covect = self.eta * covect / (norm.unsqueeze(-1) + self.eps)
+        return covect
+
 
 class OneForm_zero(torch.nn.Module):
     """ Implements the null 1-form 
@@ -2430,3 +2473,45 @@ class OneForm_zero(torch.nn.Module):
             Tensor: Zero covectors of shape (N_batch, 2)
         """
         return torch.zeros_like(z)
+
+class RandersCentroidRotational(RandersMetrics):
+    """ Randers metric consisting of a (My) Centroid cometric with a rotational one form
+    """
+
+    def __init__(
+        self,
+        centroids: Tensor = None,
+        cometric_centroids: Tensor = None,
+        temperature: float = 1.0,
+        reg_coef: float = 1e-3,
+        K: int = None,
+        metric_weight: bool = True,
+        temperature_scale: float = 5.0,
+        beta : float = 1.
+        ):
+        cometric = MyCentroidsCometric(
+            centroids,
+            cometric_centroids,
+            temperature, 
+            reg_coef, 
+            K, 
+            metric_weight, 
+            temperature_scale
+        )
+        omega = OneForm_dthetaRiemann(cometric)
+        super().__init__(cometric, omega, beta)
+
+
+class RandersBumpRotational(RandersMetrics):
+    """ Randers metric consisting of a bump ring cometric with a rotational one form
+    """
+
+    def __init__(
+        self,
+        beta : float = 1.
+        ):
+        cometric = RingCometricBump(0.1)
+        omega = OneForm_dthetaRiemann(cometric)
+        super().__init__(cometric, omega, beta)
+
+
