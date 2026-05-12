@@ -1024,7 +1024,7 @@ class ImplicitRHMCSampler(Sampler):
         """
         v_half = v.clone()
         for k in range(self.N_fx):
-            v_half_ = v_half - self.gamma * self.dH_dz(z, v_half) / 2
+            v_half_ = v - self.gamma * self.dH_dz(z, v_half) / 2
             if (v_half_ - v_half).abs().max() < self.threshold_fx:
                 v_half = v_half_
                 break
@@ -1051,7 +1051,7 @@ class ImplicitRHMCSampler(Sampler):
         z_new = z.clone()
         for k in range(self.N_fx):
             z_new_ = (
-                z_new + self.gamma * (self.dH_dv(z, v_half) + self.dH_dv(z_new, v_half)) / 2
+                z + self.gamma * (self.dH_dv(z, v_half) + self.dH_dv(z_new, v_half)) / 2
             )
             if (z_new_ - z_new).abs().max() < self.threshold_fx:
                 z_new = z_new_
@@ -2475,14 +2475,7 @@ class ImplicitFHMC(ImplicitRHMCSampler):
         d = z.shape[1]
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
-        try:
-            L = torch.linalg.cholesky(G_star)
-        except torch._C._LinAlgError:
-            print("Cholesky failed — G_star:")
-            print(G_star)
-            print("z:", z)
-            print("eigenvalues:", torch.linalg.eigvalsh(G_star))
-            raise
+        L = torch.linalg.cholesky(G_star)
         x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
         alpha = torch.einsum("bi,bi->b", w_star, x)
         logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
@@ -2551,6 +2544,8 @@ class ImplicitFHMC(ImplicitRHMCSampler):
             + 0.5 * d * self.log2pi
         )
 
+    def H(self, z: Tensor, p: Tensor) -> Tensor:
+        return 0.5 * self.randers_cometric(z, p) ** 2
 
     def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
         """
@@ -2568,7 +2563,7 @@ class ImplicitFHMC(ImplicitRHMCSampler):
         b, d = p.shape
         n_accept = 0
         n_total = 0
-        
+
         if self.cometric.is_diag :
             M = torch.diag_embed(self.randers_cometric.G_star(z))
      
@@ -2873,14 +2868,7 @@ class ExplicitFHMC(ExplicitRHMCSampler):
         d = z.shape[1]
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
-        try:
-            L = torch.linalg.cholesky(G_star)
-        except torch._C._LinAlgError:
-            print("Cholesky failed — G_star:")
-            print(G_star)
-            print("z:", z)
-            print("eigenvalues:", torch.linalg.eigvalsh(G_star))
-            raise
+        L = torch.linalg.cholesky(G_star)
         x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
         alpha = torch.einsum("bi,bi->b", w_star, x)
         logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
@@ -2949,6 +2937,8 @@ class ExplicitFHMC(ExplicitRHMCSampler):
             + 0.5 * d * self.log2pi
         )
 
+    def H(self, z: Tensor, p: Tensor) -> Tensor:
+        return 0.5 * self.randers_cometric(z, p) ** 2
 
     def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
         """
@@ -2966,7 +2956,7 @@ class ExplicitFHMC(ExplicitRHMCSampler):
         b, d = p.shape
         n_accept = 0
         n_total = 0
-        
+
         if self.cometric.is_diag :
             M = torch.diag_embed(self.randers_cometric.G_star(z))
      
@@ -3272,14 +3262,7 @@ class ImplicitFHMCLegendre(ImplicitRHMCSampler):
         d = z.shape[1]
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
-        try:
-            L = torch.linalg.cholesky(G_star)
-        except torch._C._LinAlgError:
-            print("Cholesky failed — G_star:")
-            print(G_star)
-            print("z:", z)
-            print("eigenvalues:", torch.linalg.eigvalsh(G_star))
-            raise
+        L = torch.linalg.cholesky(G_star)
         x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
         alpha = torch.einsum("bi,bi->b", w_star, x)
         logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
@@ -3402,7 +3385,8 @@ class ImplicitFHMCLegendre(ImplicitRHMCSampler):
             + 0.5 * d * self.log2pi
         )
 
-
+    def H(self, z: Tensor, p: Tensor) -> Tensor:
+        return 0.5 * self.randers_cometric(z, p) ** 2
 
     def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
         """
@@ -3537,47 +3521,47 @@ class ImplicitFHMCLegendre(ImplicitRHMCSampler):
         M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
         if self.randers_cometric.primal_randers.base_cometric.is_diag:
             M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.omega(z)
+        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
 
         L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)                                              
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))            
-        zero_mask = beta < 1e-10                                                 
+        M_inv = torch.linalg.inv(M)
+        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
+        zero_mask = beta < 1e-10
 
         safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)                         
+        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
         mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
         rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-        
+
         # Initialize containers for the accepted directions u'
         final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
         accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-        
+
         # Acceptance-Rejection for the direction u'
         while not accepted_mask.all():
             active_indices = torch.where(~accepted_mask)[0]
             num_to_sample = len(active_indices)
-            
+
             v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-            
+
             # Moebius transform on the subset
             u_subset = self.moebius_transform(
-                v_subset, 
-                mu[active_indices], 
-                rho[active_indices], 
+                v_subset,
+                mu[active_indices],
+                rho[active_indices],
                 M[active_indices]
             )
-            
+
            # Bernoulli accept-reject
             p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
             alpha = torch.rand(num_to_sample, device=z.device) <= p
-            
+
             if alpha.any():
                 just_accepted_indices = active_indices[alpha]
                 final_u_prime[just_accepted_indices] = u_subset[alpha]
                 accepted_mask[just_accepted_indices] = True
-                
-        # Sample radius r 
+
+        # Sample radius r
         s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
         r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
         
@@ -3732,14 +3716,7 @@ class ExplicitFHMCLegendre(ExplicitRHMCSampler):
         d = z.shape[1]
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
-        try:
-            L = torch.linalg.cholesky(G_star)
-        except torch._C._LinAlgError:
-            print("Cholesky failed — G_star:")
-            print(G_star)
-            print("z:", z)
-            print("eigenvalues:", torch.linalg.eigvalsh(G_star))
-            raise
+        L = torch.linalg.cholesky(G_star)
         x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
         alpha = torch.einsum("bi,bi->b", w_star, x)
         logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
@@ -3862,7 +3839,8 @@ class ExplicitFHMCLegendre(ExplicitRHMCSampler):
             + 0.5 * d * self.log2pi
         )
 
-
+    def H(self, z: Tensor, p: Tensor) -> Tensor:
+        return 0.5 * self.randers_cometric(z, p) ** 2
 
     def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
         """
@@ -3997,47 +3975,47 @@ class ExplicitFHMCLegendre(ExplicitRHMCSampler):
         M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
         if self.randers_cometric.primal_randers.base_cometric.is_diag:
             M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.omega(z)
+        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
 
         L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)                                              
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))            
-        zero_mask = beta < 1e-10                                                 
+        M_inv = torch.linalg.inv(M)
+        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
+        zero_mask = beta < 1e-10
 
         safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)                         
+        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
         mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
         rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-        
+
         # Initialize containers for the accepted directions u'
         final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
         accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-        
+
         # Acceptance-Rejection for the direction u'
         while not accepted_mask.all():
             active_indices = torch.where(~accepted_mask)[0]
             num_to_sample = len(active_indices)
-            
+
             v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-            
+
             # Moebius transform on the subset
             u_subset = self.moebius_transform(
-                v_subset, 
-                mu[active_indices], 
-                rho[active_indices], 
+                v_subset,
+                mu[active_indices],
+                rho[active_indices],
                 M[active_indices]
             )
-            
+
            # Bernoulli accept-reject
             p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
             alpha = torch.rand(num_to_sample, device=z.device) <= p
-            
+
             if alpha.any():
                 just_accepted_indices = active_indices[alpha]
                 final_u_prime[just_accepted_indices] = u_subset[alpha]
                 accepted_mask[just_accepted_indices] = True
-                
-        # Sample radius r 
+
+        # Sample radius r
         s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
         r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
         
@@ -4284,49 +4262,27 @@ class ImplicitFHMCLegendreBis(ImplicitRHMCSampler):
         riem_norm = torch.sqrt(p_Gstar_p)
 
         # log(F* / ||p||_{G*}) = log(1 + (ω*)^T p / ||p||_{G*})
-        # Use log1p for numerical stability when ω* is small.
         wstar_p = torch.einsum("bi,bi->b", w_star, p)
-        log_randers_factor = torch.log(wstar_p / riem_norm)
+        log_randers_factor = torch.log1p(wstar_p / riem_norm)
 
         return (
             0.5 * F_star**2
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
+            + 0.5 * (d + 1) * torch.log1p(-alpha)
             - (d + 1) * log_randers_factor
             + 0.5 * logdet_G
             + 0.5 * d * self.log2pi
         )
 
-    # def K(self, p: Tensor, z: Tensor) -> Tensor:
-    #     """Compute Kinetic energy in the randers case 
-    #     K(p) = (
-    #     1/2 * F_z^*(p)^2
-    #     - (d+1)/2 * log(1-g^*_inv(omega^*))
-    #     -1/2 * logdet G^* + d/2 * log 2pi
-    #     )
-
-    #     Args:
-    #         p (Tensor): Momentum vector of shape (n_batch, d)
-    #         z (Tensor): Position vector of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor: Kinetic energy of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-
-    #     metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-    #     G_star = self.randers_cometric.G_star(z)          
-    #     w_star = self.randers_cometric.omega_star(z)     
-    #     L = torch.linalg.cholesky(G_star)
-    #     x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-    #     alpha = torch.einsum("bi,bi->b", w_star, x)
-    #     logdet_G = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
-
-    #     return (
-    #         metric_term
-    #         - 0.5 * (d + 1) * torch.log1p(-alpha)
-    #         - 0.5 * logdet_G
-    #         + 0.5 * d * self.log2pi
-    #     )
+    def H(self, z : Tensor, p : Tensor) -> Tensor : 
+        d = z.shape[1]
+        F_star = self.randers_cometric(z, p)
+        w_star = self.randers_cometric.omega_star(z)
+        G_star = self.randers_cometric.G_star(z)
+        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        riem_norm = torch.sqrt(p_Gstar_p)
+        wstar_p = torch.einsum("bi,bi->b", w_star, p)
+        log_randers_factor = torch.log1p(wstar_p / riem_norm)
+        return 0.5 * F_star**2-(d + 1) * log_randers_factor
 
 
     def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
@@ -4462,47 +4418,47 @@ class ImplicitFHMCLegendreBis(ImplicitRHMCSampler):
         M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
         if self.randers_cometric.primal_randers.base_cometric.is_diag:
             M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.omega(z)
+        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
 
         L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)                                              
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))            
-        zero_mask = beta < 1e-10                                                 
+        M_inv = torch.linalg.inv(M)
+        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
+        zero_mask = beta < 1e-10
 
         safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)                         
+        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
         mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
         rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-        
+
         # Initialize containers for the accepted directions u'
         final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
         accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-        
+
         # Acceptance-Rejection for the direction u'
         while not accepted_mask.all():
             active_indices = torch.where(~accepted_mask)[0]
             num_to_sample = len(active_indices)
-            
+
             v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-            
+
             # Moebius transform on the subset
             u_subset = self.moebius_transform(
-                v_subset, 
-                mu[active_indices], 
-                rho[active_indices], 
+                v_subset,
+                mu[active_indices],
+                rho[active_indices],
                 M[active_indices]
             )
-            
+
            # Bernoulli accept-reject
             p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
             alpha = torch.rand(num_to_sample, device=z.device) <= p
-            
+
             if alpha.any():
                 just_accepted_indices = active_indices[alpha]
                 final_u_prime[just_accepted_indices] = u_subset[alpha]
                 accepted_mask[just_accepted_indices] = True
-                
-        # Sample radius r 
+
+        # Sample radius r
         s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
         r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
         
@@ -4654,17 +4610,20 @@ class ExplicitFHMCLegendreBis(ExplicitRHMCSampler):
             Tensor of shape (n_batch,)
         """
         d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z)          
+        G_star = self.randers_cometric.G_star(z) 
+        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
+        if self.randers_cometric.primal_randers.base_cometric.is_diag == True:      
+            G = torch.diag_embed(G) 
         w_star = self.randers_cometric.omega_star(z)     
         L = torch.linalg.cholesky(G_star)
+        L_primal = torch.linalg.cholesky(G)
         x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
         alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        logdet_G = 2.0 * torch.log(torch.diagonal(L_primal, dim1=-2, dim2=-1)).sum(dim=-1)
 
         return (
             - 0.5 * (d + 1) * torch.log1p(-alpha)
             - 0.5 * logdet_G
-            + 0.5 * d * self.log2pi
         )
 
     # def U(self, z: Tensor) -> Tensor:
@@ -4710,7 +4669,7 @@ class ExplicitFHMCLegendreBis(ExplicitRHMCSampler):
 
             K(z,p) = 1/2 · F*(z,p)^2
                     - (d+1) · log(F*(z,p) / ||p||_{G*})
-                    - 1/2 · log det G*(z)
+                    + 1/2 · log det G(z)
                     + d/2 · log(2π).
 
         Sanity check: in the Riemannian limit (ω* = 0), F*(p) = ||p||_{G*}, the
@@ -4731,28 +4690,45 @@ class ExplicitFHMCLegendreBis(ExplicitRHMCSampler):
 
         # G*(z), ω*(z), and log det G*(z) via Cholesky
         G_star = self.randers_cometric.G_star(z)
+        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
+        if self.randers_cometric.primal_randers.base_cometric.is_diag == True : 
+            G = torch.diag_embed(G)
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        L_primal = torch.linalg.cholesky(G)
+        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", w_star, x)
+        logdet_G = 2.0 * torch.log(torch.diagonal(L_primal, dim1=-2, dim2=-1)).sum(dim=-1)
 
         # Riemannian dual norm  ||p||_{G*} = sqrt(p^T G* p)
         p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
         riem_norm = torch.sqrt(p_Gstar_p)
 
         # log(F* / ||p||_{G*}) = log(1 + (ω*)^T p / ||p||_{G*})
-        # Use log1p for numerical stability when ω* is small.
         wstar_p = torch.einsum("bi,bi->b", w_star, p)
         log_randers_factor = torch.log1p(wstar_p / riem_norm)
 
         return (
             0.5 * F_star**2
+            + 0.5 * (d + 1) * torch.log1p(-alpha)
             - (d + 1) * log_randers_factor
-            - 0.5 * logdet_G_star
+            + 0.5 * logdet_G
             + 0.5 * d * self.log2pi
         )
 
+    def H(self, z: Tensor, p: Tensor) -> Tensor:
+        d = z.shape[1]
+        F_star = self.randers_cometric(z, p)
+        w_star = self.randers_cometric.omega_star(z)
+        G_star = self.randers_cometric.G_star(z)
+        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        riem_norm = torch.sqrt(p_Gstar_p)
+        wstar_p = torch.einsum("bi,bi->b", w_star, p)
+        log_randers_factor = torch.log1p(wstar_p / riem_norm)
+        return 0.5 * F_star**2 - (d + 1) * log_randers_factor
+
     # def K(self, p: Tensor, z: Tensor) -> Tensor:
-    #     """Compute Kinetic energy in the randers case 
+    #     """Compute Kinetic energy in the randers case
     #     K(p) = (
     #     1/2 * F_z^*(p)^2
     #     - (d+1)/2 * log(1-g^*_inv(omega^*))
@@ -4917,47 +4893,47 @@ class ExplicitFHMCLegendreBis(ExplicitRHMCSampler):
         M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
         if self.randers_cometric.primal_randers.base_cometric.is_diag:
             M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.omega(z)
+        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
 
         L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)                                              
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))            
-        zero_mask = beta < 1e-10                                                 
+        M_inv = torch.linalg.inv(M)
+        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
+        zero_mask = beta < 1e-10
 
         safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)                         
+        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
         mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
         rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-        
+
         # Initialize containers for the accepted directions u'
         final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
         accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-        
+
         # Acceptance-Rejection for the direction u'
         while not accepted_mask.all():
             active_indices = torch.where(~accepted_mask)[0]
             num_to_sample = len(active_indices)
-            
+
             v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-            
+
             # Moebius transform on the subset
             u_subset = self.moebius_transform(
-                v_subset, 
-                mu[active_indices], 
-                rho[active_indices], 
+                v_subset,
+                mu[active_indices],
+                rho[active_indices],
                 M[active_indices]
             )
-            
+
            # Bernoulli accept-reject
             p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
             alpha = torch.rand(num_to_sample, device=z.device) <= p
-            
+
             if alpha.any():
                 just_accepted_indices = active_indices[alpha]
                 final_u_prime[just_accepted_indices] = u_subset[alpha]
                 accepted_mask[just_accepted_indices] = True
-                
-        # Sample radius r 
+
+        # Sample radius r
         s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
         r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
         
