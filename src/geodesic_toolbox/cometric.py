@@ -2514,4 +2514,121 @@ class RandersBumpRotational(RandersMetrics):
         omega = OneForm_dthetaRiemann(cometric)
         super().__init__(cometric, omega, beta)
 
+class RosenbrockHessian(CoMetric):
+    """Cometric induced by the negative Hessian of the Rosenbrock log-density."""
+
+    def __init__(self):
+        super().__init__(is_diag=False)
+
+    def forward(self, q: Tensor) -> Tensor:
+        x = q[:, 0]
+        y = q[:, 1]
+
+        den = 1 - 200 * (y - x ** 2)
+
+        m00 = -10 / den
+        m01 = -20 * x / den
+        m11 = (20 * (y - x ** 2) - 40 * x ** 2 - 0.1) / den
+
+        row0 = torch.stack([m00, m01], dim=1)
+        row1 = torch.stack([m01, m11], dim=1)
+        return torch.stack([row0, row1], dim=1)
+
+class RosenbrockSoftAbs(CoMetric):
+    """SoftAbs cometric for the Rosenbrock log-density (Betancourt 2013)."""
+
+    def __init__(self, alpha: float = 1.0):
+        super().__init__(is_diag=False)
+        self.alpha = alpha
+
+    def _hessian(self, q: Tensor) -> Tensor:
+        x = q[:, 0]
+        y = q[:, 1]
+
+        r = y - x ** 2
+
+        h00 = 20.0 * r - 40.0 * x ** 2 - 0.1
+        h01 = 20.0 * x
+        h11 = torch.full_like(x, -10.0)
+
+        row0 = torch.stack([h00, h01], dim=1)
+        row1 = torch.stack([h01, h11], dim=1)
+        return torch.stack([row0, row1], dim=1)
+
+    def forward(self, q: Tensor) -> Tensor:
+        H = self._hessian(q)
+        lam, Phi = torch.linalg.eigh(H)
+
+        alpha_lam = self.alpha * lam
+        cometric_eigs = torch.where(
+            lam.abs() > 1e-8,
+            torch.tanh(alpha_lam) / lam,
+            torch.full_like(lam, self.alpha),
+        )
+
+        return torch.einsum("bij,bj,bkj->bik", Phi, cometric_eigs, Phi)
+
+class RosenbrockScore(torch.nn.Module):
+    def __init__(self, alpha: float = 1, eps: float = 1e-8, cometric=None):
+        super().__init__()
+        self.cometric = cometric if cometric is not None else RosenbrockSoftAbs(alpha)
+        self.eps = eps
+
+    def forward(self, z: Tensor, G_inv: Tensor | None = None) -> Tensor:
+        x, y = z[:, 0], z[:, 1]
+        s = torch.stack(
+            [20 * x * (y - x ** 2) + (1 - x) / 10,
+             -10 * (y - x ** 2)],
+            dim=1,
+        )
+        if G_inv is None:
+            norm_sq = self.cometric.cometric(z, s)
+        else:
+            norm_sq = torch.einsum("bi,bij,bj->b", s, G_inv, s)
+        norm = norm_sq.sqrt()
+        return -torch.sigmoid(norm).unsqueeze(1) * s / (norm.unsqueeze(1) + self.eps)
+
+class RosenbrockRanders(RandersMetrics):
+
+    def __init__(self, alpha : float = 1, beta: float = 1):
+        cometric = RosenbrockSoftAbs(alpha)
+        omega = RosenbrockScore(alpha)
+        super().__init__(
+            base_cometric= cometric,
+            omega = omega, 
+            beta = beta
+        )
+
+class RosenbrockDualRanders(DualRandersMetrics):
+    def __init__(self, alpha: float = 1.0, beta: float = 1.0, epsilon: float = 1e-8):
+        randers_metric = RosenbrockRanders(alpha=alpha, beta=beta)
+        super().__init__(randers_metric, epsilon)
+
+    # ----- helper: one eigh, returns everything that depends only on x -----
+    def _shared(self, x: Tensor):
+        G_inv = self.primal_randers.base_cometric.cometric_tensor(x)             # eigh ONCE
+        omega = self.primal_randers.beta * self.primal_randers.omega(x, G_inv=G_inv)
+        G_inv_w = torch.einsum("bij,bj->bi", G_inv, omega)
+        alpha   = 1 - torch.einsum("bi,bi->b", omega, G_inv_w)
+        omega_star = -G_inv_w / alpha[:, None]
+        # G_star via the matrix-det-lemma form
+        G_star = (torch.einsum("bi,bj->bij", G_inv_w, G_inv_w)
+                  + alpha[:, None, None] * G_inv) / alpha[:, None, None] ** 2
+        return G_inv, omega_star, G_star
+
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
+        _, omega_star, G_star = self._shared(x)
+        v_norm = torch.einsum("bi,bij,bj->b", v, G_star, v).sqrt()
+        F_star = v_norm + torch.einsum("bi,bi->b", omega_star, v)
+        return torch.sqrt(F_star ** 2 + self.epsilon ** 2)
+
+    def omega_star(self, x: Tensor) -> Tensor:
+        _, omega_star, _ = self._shared(x)
+        return omega_star
+
+    def G_star(self, x: Tensor) -> Tensor:
+        _, _, G_star = self._shared(x)
+        return G_star
+        
+        
 
