@@ -1049,9 +1049,10 @@ class ImplicitRHMCSampler(Sampler):
             The new position.
         """
         z_new = z.clone()
+        dH_dv = self.dH_dv(z, v_half)
         for k in range(self.N_fx):
             z_new_ = (
-                z + self.gamma * (self.dH_dv(z, v_half) + self.dH_dv(z_new, v_half)) / 2
+                z + self.gamma * (dH_dv + self.dH_dv(z_new, v_half)) / 2
             )
             if (z_new_ - z_new).abs().max() < self.threshold_fx:
                 z_new = z_new_
@@ -2476,9 +2477,9 @@ class ImplicitFHMC(ImplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             + 0.5 * (d + 1) * torch.log1p(-alpha)
@@ -2533,9 +2534,9 @@ class ImplicitFHMC(ImplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)          
         w_star = self.randers_cometric.omega_star(z)     
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             metric_term
@@ -2869,9 +2870,9 @@ class ExplicitFHMC(ExplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             + 0.5 * (d + 1) * torch.log1p(-alpha)
@@ -2926,9 +2927,9 @@ class ExplicitFHMC(ExplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)          
         w_star = self.randers_cometric.omega_star(z)     
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             metric_term
@@ -3263,9 +3264,9 @@ class ImplicitFHMCLegendre(ImplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             + 0.5 * (d + 1) * torch.log1p(-alpha)
@@ -3374,9 +3375,9 @@ class ImplicitFHMCLegendre(ImplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)          
         w_star = self.randers_cometric.omega_star(z)     
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             metric_term
@@ -3717,9 +3718,9 @@ class ExplicitFHMCLegendre(ExplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             + 0.5 * (d + 1) * torch.log1p(-alpha)
@@ -3828,9 +3829,9 @@ class ExplicitFHMCLegendre(ExplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)          
         w_star = self.randers_cometric.omega_star(z)     
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             metric_term
@@ -4174,9 +4175,9 @@ class ImplicitFHMCLegendreBis(ImplicitRHMCSampler):
         w_star = self.randers_cometric.omega_star(z)     
         L = torch.linalg.cholesky(G_star)
         L_primal = torch.linalg.cholesky(G)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G = 2.0 * torch.log(torch.diagonal(L_primal, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             - 0.5 * (d + 1) * torch.log1p(-alpha)
@@ -4253,9 +4254,9 @@ class ImplicitFHMCLegendreBis(ImplicitRHMCSampler):
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
         L_primal = torch.linalg.cholesky(G)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G = 2.0 * torch.log(torch.diagonal(L_primal, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
 
         # Riemannian dual norm  ||p||_{G*} = sqrt(p^T G* p)
         p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
@@ -4617,9 +4618,9 @@ class ExplicitFHMCLegendreBis(ExplicitRHMCSampler):
         w_star = self.randers_cometric.omega_star(z)     
         L = torch.linalg.cholesky(G_star)
         L_primal = torch.linalg.cholesky(G)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G = 2.0 * torch.log(torch.diagonal(L_primal, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             - 0.5 * (d + 1) * torch.log1p(-alpha)
@@ -4696,9 +4697,9 @@ class ExplicitFHMCLegendreBis(ExplicitRHMCSampler):
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
         L_primal = torch.linalg.cholesky(G)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G = 2.0 * torch.log(torch.diagonal(L_primal, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
 
         # Riemannian dual norm  ||p||_{G*} = sqrt(p^T G* p)
         p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
@@ -5073,9 +5074,9 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
         G_star = self.randers_cometric.G_star(z)
         w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             + 0.5 * (d + 1) * torch.log1p(-alpha)
@@ -5099,12 +5100,12 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
         """
         d = z.shape[1]
         metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-        G_star = self.randers_cometric.G_star(z)          
-        w_star = self.randers_cometric.omega_star(z)     
+        G_star = self.randers_cometric.G_star(z)
+        w_star = self.randers_cometric.omega_star(z)
         L = torch.linalg.cholesky(G_star)
-        x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", w_star, x)
-        logdet_G_star = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
+        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
+        alpha = torch.einsum("bi,bi->b", y, y)
+        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
 
         return (
             metric_term
@@ -5395,9 +5396,10 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
         """
         d = dirs[:, None]
         z_new = z.clone()
+        dH_dv = self.dH_dv(z, v_half)
         for k in range(self.N_fx):
             z_new_ = (
-                z + d * self.gamma * (self.dH_dv(z, v_half) + self.dH_dv(z_new, v_half)) / 2
+                z + d * self.gamma * (dH_dv+ self.dH_dv(z_new, v_half)) / 2
             )
             if (z_new_ - z_new).abs().max() < self.threshold_fx:
                 z_new = z_new_
@@ -5523,11 +5525,6 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
             try:
                 z_l, v_l = self.leapfrog(z, v_0, dirs)
                 alpha = self.get_alpha(z, v_0, z_l, v_l)
-                if self.reduced_flip:
-                    # Reduced momentum flip (Sohl-Dickstein 2012, Eq. 11):
-                    # P_flip = max(0, alpha(LFζ) - alpha(Lζ))
-                    z_l_flip, v_l_flip = self.leapfrog(z, v_0, -dirs)
-                    alpha_flip = self.get_alpha(z, v_0, z_l_flip, v_l_flip)
             except _LinAlgError:
                 # @TODO: Handle this error properly.
                 # Not the best way to handle this error.
@@ -5535,15 +5532,27 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
                 # will stop the whole process even for other valid samples.
                 alpha = torch.zeros(z.shape[0], device=z.device)
                 z_l = z.clone()
-                if self.reduced_flip:
-                    alpha_flip = torch.zeros(z.shape[0], device=z.device)
 
             if not self.skip_acceptance:
                 u = torch.rand_like(alpha)
                 accept_mask = u < alpha
                 if self.reduced_flip:
-                    p_flip = (alpha_flip - alpha).clamp(min=0)
-                    flip_mask = ~accept_mask & (u < alpha + p_flip)
+                    rej_idx = (~accept_mask).nonzero(as_tuple=False).squeeze(-1)
+                    if rej_idx.numel() > 0:
+                        # Reduced momentum flip (Sohl-Dickstein 2012, Eq. 11):
+                        # P_flip = max(0, alpha(LFζ) - alpha(Lζ))
+                        # Only computed for rejected samples.
+                        try:
+                            z_l_flip, v_l_flip = self.leapfrog(z[rej_idx], v_0[rej_idx], -dirs[rej_idx])
+                            alpha_flip_rej = self.get_alpha(z[rej_idx], v_0[rej_idx], z_l_flip, v_l_flip)
+                        except _LinAlgError:
+                            alpha_flip_rej = torch.zeros(rej_idx.numel(), device=z.device)
+                        alpha_flip = torch.zeros_like(alpha)
+                        alpha_flip[rej_idx] = alpha_flip_rej
+                        p_flip = (alpha_flip - alpha).clamp(min=0)
+                        flip_mask = ~accept_mask & (u < alpha + p_flip)
+                    else:
+                        flip_mask = ~accept_mask  # all False, no rejections
                 else:
                     flip_mask = ~accept_mask
                 z = torch.where(accept_mask[:, None], z_l, z)
