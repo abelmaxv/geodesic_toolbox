@@ -2604,10 +2604,157 @@ class RosenbrockDualRanders(DualRandersMetrics):
         randers_metric = RosenbrockRanders(alpha=alpha, beta=beta)
         super().__init__(randers_metric, epsilon)
 
-    # ----- helper: one eigh, returns everything that depends only on x -----
+    def _shared(self, x: Tensor):
+        G_inv = self.primal_randers.base_cometric.cometric_tensor(x)            
+        omega = self.primal_randers.beta * self.primal_randers.omega(x)
+        G_inv_w = torch.einsum("bij,bj->bi", G_inv, omega)
+        alpha   = 1 - torch.einsum("bi,bi->b", omega, G_inv_w)
+        omega_star = -G_inv_w / alpha[:, None]
+        G_star = (torch.einsum("bi,bj->bij", G_inv_w, G_inv_w)
+                  + alpha[:, None, None] * G_inv) / alpha[:, None, None] ** 2
+        return G_inv, omega_star, G_star
+
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
+        _, omega_star, G_star = self._shared(x)
+        v_norm = torch.einsum("bi,bij,bj->b", v, G_star, v).sqrt()
+        F_star = v_norm + torch.einsum("bi,bi->b", omega_star, v)
+        return torch.sqrt(F_star ** 2 + self.epsilon ** 2)
+
+    def omega_star(self, x: Tensor) -> Tensor:
+        _, omega_star, _ = self._shared(x)
+        return omega_star
+
+    def G_star(self, x: Tensor) -> Tensor:
+        _, _, G_star = self._shared(x)
+        return G_star
+
+
+class FunnelHessian(CoMetric):
+    """Cometric induced by the negative Hessian of Neil's funnel log-density."""
+
+    def __init__(self, K : int):
+        super().__init__(is_diag=False)
+        self.K = K
+
+    def forward(self, q: Tensor) -> Tensor:
+        v = q[:, 0]
+        theta = q[:, 1:]
+
+        exp_mv = torch.exp(-v)
+        theta_norm2 = (theta**2).sum(dim = 1)
+
+        h_vv = -1.0 / 9.0 - 0.5 * exp_mv * theta_norm2 
+        h_vtheta = exp_mv.unsqueeze(1) * theta 
+        h_tt = -exp_mv.unsqueeze(1).unsqueeze(2) * torch.eye(
+            self.K, device=q.device, dtype=q.dtype
+        ).unsqueeze(0)
+
+        H = torch.zeros(q.shape[0], self.K+1, self.K+1, device=q.device, dtype=q.dtype)
+        H[:, 0, 0] = h_vv
+        H[:, 0, 1:] = h_vtheta
+        H[:, 1:, 0] = h_vtheta
+        H[:, 1:, 1:] = h_tt
+        return H
+
+class FunnelSoftAbs(CoMetric):
+    """SoftAbs cometric for Neal's funnel log-density (Betancourt 2013).
+    
+    Parameters
+    ----------
+    K : int
+        Dimension of theta (total dimension is K+1).
+    alpha : float
+        SoftAbs sharpness.
+    """
+
+    def __init__(self, dim: int, alpha: float = 1.0):
+        super().__init__(is_diag=False)
+        self.dim = dim
+        self.alpha = alpha
+
+    def _hessian(self, q: Tensor) -> Tensor:
+        v = q[:, 0]
+        theta = q[:, 1:]
+
+        exp_mv = torch.exp(-v)
+        theta_norm2 = (theta**2).sum(dim=1)
+
+        h_vv = -1.0 / 9.0 - 0.5 * exp_mv * theta_norm2
+        h_vtheta = exp_mv.unsqueeze(1) * theta
+        h_tt = -exp_mv.unsqueeze(1).unsqueeze(2) * torch.eye(
+            self.dim, device=q.device, dtype=q.dtype
+        ).unsqueeze(0)
+
+        first_row = torch.cat(
+            [h_vv.unsqueeze(1), h_vtheta], dim=1
+        ).unsqueeze(1)
+        rest_rows = torch.cat([h_vtheta.unsqueeze(2), h_tt], dim=2)
+        H = torch.cat([first_row, rest_rows], dim=1)
+        return H
+
+    def forward(self, q: Tensor) -> Tensor:
+        H = self._hessian(q)
+        eps_reg = 1e-3 * torch.arange(H.shape[-1], device=q.device, dtype=q.dtype)
+        H = H + torch.diag(eps_reg).unsqueeze(0)
+        lam, Phi = torch.linalg.eigh(H)
+
+        alpha_lam = self.alpha * lam
+        cometric_eigs = torch.where(
+            lam.abs() > 1e-8,
+            torch.tanh(alpha_lam) / lam,
+            torch.full_like(lam, self.alpha),
+        )
+        return torch.einsum("bij,bj,bkj->bik", Phi, cometric_eigs, Phi)
+
+
+class FunnelScore(torch.nn.Module):
+    def __init__(self, K: int, alpha: float = 1, eps: float = 1e-8, cometric=None):
+        super().__init__()
+        self.K = K
+        self.cometric = cometric if cometric is not None else FunnelSoftAbs(K, alpha)
+        self.eps = eps
+
+    def forward(self, z: Tensor) -> Tensor:
+        """Args:
+            z (Tensor): Batch of points of shape (N_batch, K+1).
+
+        Returns:
+            Tensor: Normalized score covectors of shape (N_batch, K+1).
+        """
+        v     = z[:, 0]    # (N,)
+        theta = z[:, 1:]   # (N, K)
+
+        exp_mv      = torch.exp(-v)                               # (N,)
+        theta_norm2 = (theta**2).sum(dim=1)                       # (N,)
+
+        s_v     = -v / 9.0 - self.K / 2.0 + 0.5 * exp_mv * theta_norm2  # (N,)
+        s_theta = -exp_mv.unsqueeze(1) * theta                            # (N, K)
+
+        s = torch.cat([s_v.unsqueeze(1), s_theta], dim=1)        # (N, K+1)
+
+        norm = self.cometric.cometric(z, s).sqrt()                # (N,)
+        return -torch.sigmoid(norm).unsqueeze(1) * s / (norm.unsqueeze(1) + self.eps)
+
+class FunnelRanders(RandersMetrics):
+
+    def __init__(self, dim : int, alpha : float = 1, beta: float = 1):
+        cometric = FunnelSoftAbs(dim, alpha)
+        omega = FunnelScore(dim, alpha)
+        super().__init__(
+            base_cometric= cometric,
+            omega = omega, 
+            beta = beta
+        )
+
+class FunnelDualRanders(DualRandersMetrics):
+    def __init__(self, dim : int, alpha: float = 1.0, beta: float = 1.0, epsilon: float = 1e-8):
+        randers_metric = FunnelRanders(dim, alpha=alpha, beta=beta)
+        super().__init__(randers_metric, epsilon)
+
+
     def _shared(self, x: Tensor):
         G_inv = self.primal_randers.base_cometric.cometric_tensor(x)             # eigh ONCE
-        omega = self.primal_randers.beta * self.primal_randers.omega(x, G_inv=G_inv)
+        omega = self.primal_randers.beta * self.primal_randers.omega(x)
         G_inv_w = torch.einsum("bij,bj->bi", G_inv, omega)
         alpha   = 1 - torch.einsum("bi,bi->b", omega, G_inv_w)
         omega_star = -G_inv_w / alpha[:, None]
@@ -2628,7 +2775,6 @@ class RosenbrockDualRanders(DualRandersMetrics):
 
     def G_star(self, x: Tensor) -> Tensor:
         _, _, G_star = self._shared(x)
-        return G_star
-        
+        return G_star     
         
 
