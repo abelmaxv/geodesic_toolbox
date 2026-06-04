@@ -1217,7 +1217,7 @@ class ImplicitRHMCSampler(Sampler):
             v = torch.einsum("bij,bi->bj", mat_sqrt(g), v) * self.std_0
         return v
 
-    @torch.no_grad()
+#    @torch.no_grad()
     def sample(
         self, z_0: Tensor, return_traj=False, progress=False, return_acceptance=False
     ) -> Tensor | tuple[Tensor, float]:
