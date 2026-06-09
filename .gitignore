@@ -5,3 +5,5 @@ build/*
 *.pyc
 /examples/*
 API_config/*
+internship_experiments/jobs
+internship_experiments/logs
