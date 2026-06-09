@@ -2514,6 +2514,8 @@ class RandersBumpRotational(RandersMetrics):
         omega = OneForm_dthetaRiemann(cometric)
         super().__init__(cometric, omega, beta)
 
+### FOR ROSENBROCK DISTRIBUTION ###
+
 class RosenbrockHessian(CoMetric):
     """Cometric induced by the negative Hessian of the Rosenbrock log-density."""
 
@@ -2627,6 +2629,9 @@ class RosenbrockDualRanders(DualRandersMetrics):
     def G_star(self, x: Tensor) -> Tensor:
         _, _, G_star = self._shared(x)
         return G_star
+
+
+### FOR FUNNEL DISTRIBUTION ###
 
 
 class FunnelHessian(CoMetric):
@@ -2778,3 +2783,198 @@ class FunnelDualRanders(DualRandersMetrics):
         return G_star     
         
 
+### FOR LOGISTIC REGRESSION DISTRIBUTION ###
+
+class FisherRaoBLR(CoMetric):
+    """Class for the Fisher-Rao cometric associated to the Bayesian Logistic Regression model with a gaussian pior from equation (28) in [1]: 
+        G(beta) = X^T Lambda X + alpha^{-1} I
+
+    where X is a matrix of features and alpha is a variance in the prior on the parameter. 
+    Alpha also acts as a regularization factor in the metric. 
+    
+    Attibutes:
+        alpha (torch.Tensor) : Variance of the prior on beta of shape (1,)
+        features (torch.Tensor) : Matrice of features of shape (N_data, N_features + 1) to include the bias. 
+        N_data (int) : Number of data points.
+        N_features (int) : Number of features (excluding the bias). 
+
+        **Inherited Attributes:**
+       See :class:`CoMetric` for base CoMetric parameters 
+    
+    References : 
+        [1] Girolami, M., & Calderhead, B. (2011). Riemann Manifold Langevin and Hamiltonian Monte Carlo Methods. Journal of the Royal Statistical Society Series B: Statistical Methodology, 73(2), 123–214. https://doi.org/10.1111/j.1467-9868.2010.00765.x
+
+    """
+
+    def __init__(self, features : torch.Tensor, var : torch.Tensor):
+        super().__init__(is_diag = False)
+        self.var = var
+        self.features = features
+        self.N_data = features.shape[0]
+        self.N_features = features.shape[1]-1
+    
+    def logit_p(self, beta : torch.Tensor) -> torch.Tensor : 
+        """Computes the predicted logit probabilities for a given parameter beta : logit_p(beta) = X@beta.
+
+        Args:
+            beta (torch.Tensor): (Batch of) parameters of shape (N_batch, N_features + 1) to include bias.
+
+        Returns:
+            torch.Tensor: (Batch of) predicted logit probabilities of shape (N_batch, N_data).
+        """
+        return beta @ self.features.T
+
+
+    def p(self, beta : torch.Tensor) -> torch.Tensor: 
+        """Computes the predicted probabilities for a given parameter beta : p = sigmoid(X@beta)
+
+        Args:
+            beta (torch.Tensor): (Batch of) parameters of shape (N_batch, N_features + 1) to include bias.
+
+        Returns:
+            torch.Tensor: (Batch of) predicted probabilities of shape (N_batch, N_data). 
+        """
+        logit_p = self.logit_p(beta)
+        return torch.nn.functional.sigmoid(logit_p)
+
+    def metric_tensor(self, beta: torch.Tensor) -> torch.Tensor:
+        """Computes the metric tensor G(beta) as in [1] equation (28).
+
+        Args:
+            beta (torch.Tensor): (Batch of) parameters of shape (N_Batch, N_features + 1) to include bias.
+
+        Returns:
+            torch.Tensor: (Batch of) metric tensors of shape (N_batch, N_features+1, N_features+1).
+        """
+        p = self.p(beta)
+        lambda_diag = p*(1-p)
+        hess_ll = torch.einsum("bn,ni,nj->bij", lambda_diag, self.features, self.features)
+        return hess_ll + (1/self.var) * torch.eye(self.N_features+1)
+
+    def forward(self, beta : torch.Tensor) -> torch.Tensor : 
+        """Returns the cometric tensor by inverting equation (28) in [1].
+
+        Args:
+            beta (torch.Tensor): (Batch of) parameters of shape (N_batch, N_features + 1) to include bias.
+
+        Returns:
+            torch.Tensor: (Batch of) cometric tensors of shape (N_batch, N_features+1, N_features+1).
+        """
+        metric_tensor = self.metric_tensor(beta)
+        return metric_tensor.inverse()
+
+
+
+class BLRSoftAbs(CoMetric):
+    """Cometric induced by the SoftAbs of the Fisher-Rao cometric."""
+
+    def __init__(self, features : torch.Tensor, var : torch.Tensor, alpha : torch.Tensor):
+        super().__init__(is_diag = False)
+        self.var = var
+        self.alpha = alpha
+        self.features = features
+        self.N_data = features.shape[0]
+        self.N_features = features.shape[1]-1
+
+    def p(self, beta : torch.Tensor) -> torch.Tensor:
+        """Computes the predicted probabilities for a given parameter beta : p = sigmoid(X@beta)
+
+        Args:
+            beta (torch.Tensor): (Batch of) parameters of shape (N_batch, N_features + 1) to include bias.
+
+        Returns:
+            torch.Tensor: (Batch of) predicted probabilities of shape (N_batch, N_data).
+        """
+        return torch.nn.functional.sigmoid(beta @ self.features.T)
+
+    def _hessian(self, beta : torch.Tensor) -> torch.Tensor :
+        p = self.p(beta)
+        lambda_diag = p*(1-p)
+        hess_ll = torch.einsum("bn,ni,nj->bij", lambda_diag, self.features, self.features)
+        return hess_ll + (1/self.var) * torch.eye(self.N_features+1, device=beta.device, dtype=beta.dtype)
+
+    def forward(self, beta : torch.Tensor) -> torch.Tensor : 
+        H = self._hessian(beta)
+        eps_reg = 1e-3 * torch.arange(H.shape[-1], device=beta.device, dtype=beta.dtype)
+        H = H + torch.diag(eps_reg).unsqueeze(0)
+        lam, Phi = torch.linalg.eigh(H)
+
+        alpha_lam = self.alpha * lam
+        cometric_eigs = torch.where(
+            lam.abs() > 1e-8,
+            torch.tanh(alpha_lam) / lam,
+            torch.full_like(lam, self.alpha),
+        )
+        return torch.einsum("bij,bj,bkj->bik", Phi, cometric_eigs, Phi)
+
+
+class BLRScore(torch.nn.Module):
+
+    def __init__(self, features: torch.Tensor, labels: torch.Tensor, var : float = 1, alpha: float = 1, eps: float = 1e-8, cometric=None):
+        super().__init__()
+        self.features = features          
+        self.labels = labels 
+        self.var = var             
+        self.alpha = alpha
+        self.cometric = cometric if cometric is not None else BLRSoftAbs(features, var, alpha)
+        self.eps = eps
+
+    def forward(self, beta: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            beta (Tensor): Batch of parameter vectors of shape (N_batch, D).
+
+        Returns:
+            Tensor: Normalized score covectors of shape (N_batch, D).
+        """
+        logits = beta @ self.features.T              # (N_batch, N_data)
+        p_hat  = torch.sigmoid(logits)               # (N_batch, N_data)
+
+        residuals = self.labels.unsqueeze(0) - p_hat # (N_batch, N_data)
+        s = residuals @ self.features - beta / self.var # (N_batch, D)
+        
+        norm = self.cometric.cometric(beta, s).sqrt()                  # (N_batch,)
+        return -torch.sigmoid(norm).unsqueeze(1) * s / (norm.unsqueeze(1) + self.eps)
+
+
+class BLRRanders(RandersMetrics):
+
+    def __init__(self, features: torch.Tensor, labels: torch.Tensor, var : float = 1, alpha: float = 1, beta: float = 1):
+        cometric = BLRSoftAbs(features, var, alpha)
+        omega = BLRScore(features, labels, var, alpha)
+        super().__init__(
+            base_cometric=cometric,
+            omega=omega,
+            beta=beta,
+        )
+
+
+class BLRDualRanders(DualRandersMetrics):
+
+    def __init__(self, features: torch.Tensor, labels: torch.Tensor, var : float = 1,  alpha: float = 1.0, beta: float = 1.0, epsilon: float = 1e-8):
+        randers_metric = BLRRanders(features, labels, var = var, alpha=alpha, beta=beta)
+        super().__init__(randers_metric, epsilon)
+
+    def _shared(self, x: Tensor):
+        G_inv = self.primal_randers.base_cometric.cometric_tensor(x)
+        omega = self.primal_randers.beta * self.primal_randers.omega(x)
+        G_inv_w = torch.einsum("bij,bj->bi", G_inv, omega)
+        alpha = 1 - torch.einsum("bi,bi->b", omega, G_inv_w)
+        omega_star = -G_inv_w / alpha[:, None]
+        G_star = (torch.einsum("bi,bj->bij", G_inv_w, G_inv_w)
+                  + alpha[:, None, None] * G_inv) / alpha[:, None, None] ** 2
+        return G_inv, omega_star, G_star
+
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
+        _, omega_star, G_star = self._shared(x)
+        v_norm = torch.einsum("bi,bij,bj->b", v, G_star, v).sqrt()
+        F_star = v_norm + torch.einsum("bi,bi->b", omega_star, v)
+        return torch.sqrt(F_star ** 2 + self.epsilon ** 2)
+
+    def omega_star(self, x: Tensor) -> Tensor:
+        _, omega_star, _ = self._shared(x)
+        return omega_star
+
+    def G_star(self, x: Tensor) -> Tensor:
+        _, _, G_star = self._shared(x)
+        return G_star
