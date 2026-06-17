@@ -220,6 +220,11 @@ def min_ess_objective(traj: Tensor, parameters: Tensor) -> Tensor:
     return ess(traj).min(dim=-1).values.mean()
 
 
+def ess_per_l_objective(traj: Tensor, parameters: Tensor) -> Tensor:
+    l = round(parameters.flatten()[0].item())
+    return ess(traj).min(dim=-1).values.mean() / l
+
+
 def target_function(
     parameters      : Tensor,
     sampler_factory : callable,
@@ -281,7 +286,7 @@ NUTS_CONFIG = {
 
 RHMC_CONFIG = {
     "sampler_factory" : make_rhmc_factory(),
-    "objective_fn"    : min_ess_objective,
+    "objective_fn"    : ess_per_l_objective,
     "bounds"          : torch.tensor([[1., -3.], [20., -0.3]]),
     "param_names"     : ["l", "log10_gamma"],
     "discrete_dims"   : [0],
@@ -289,7 +294,7 @@ RHMC_CONFIG = {
 
 FHMC_REDUCED = {
     "sampler_factory" : make_fhmc_unbiased_factory(reduced_flip=True),
-    "objective_fn"    : min_ess_objective,
+    "objective_fn"    : ess_per_l_objective,
     "bounds"          : torch.tensor([[1., -3., 0.], [20., -0.3, 1.]]),
     "param_names"     : ["l", "log10_gamma", "beta"],
     "discrete_dims"   : [0],
@@ -297,7 +302,7 @@ FHMC_REDUCED = {
 
 FHMC_NO_FLIP = {
     "sampler_factory" : make_fhmc_unbiased_factory(reduced_flip=False),
-    "objective_fn"    : min_ess_objective,
+    "objective_fn"    : ess_per_l_objective,
     "bounds"          : torch.tensor([[1., -3., 0.], [20., -0.3, 1.]]),
     "param_names"     : ["l", "log10_gamma", "beta"],
     "discrete_dims"   : [0],
@@ -472,11 +477,11 @@ def run_diagnostics(best_x: Tensor, cfg: dict, N_batch: int = 20, N_run: int = 5
     t0 = time.perf_counter()
     if has_flip:
         traj, acc_rate, flip_rate = sampler.sample(
-            z_0, return_traj=True, progress=True, return_acceptance=True, return_flip=True
+            z_0, return_traj=True, return_acceptance=True, return_flip=True
         )
     else:
         traj, acc_rate = sampler.sample(
-            z_0, return_traj=True, progress=True, return_acceptance=True
+            z_0, return_traj=True, return_acceptance=True
         )
         flip_rate = None
     elapsed = time.perf_counter() - t0

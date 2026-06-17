@@ -1,6 +1,9 @@
 import warnings
+import io
 import json
 import os
+import re
+import contextlib
 import time
 from datetime import datetime
 
@@ -9,6 +12,7 @@ import torch
 from torch import Tensor
 import tqdm
 import matplotlib.pyplot as plt
+import hamiltorch
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 
@@ -171,6 +175,69 @@ class BLRRHMCImplicit(ImplicitRHMCSampler):
         return -(lh_term + prior_term)
 
 
+class BLRNUTS:
+    _ACCEPT_RATE_RE = re.compile(r"Acceptance Rate\s*([0-9.]+)")
+
+    def __init__(self, features: Tensor, labels: Tensor,
+                 step_size: float, N_run: int, burn: int = 200, var: float = 1.):
+        self.features  = features
+        self.labels    = labels
+        self.var       = var
+        self.step_size = step_size
+        self.N_run     = N_run
+        self.burn      = burn
+        self.l         = 1
+
+    def log_prob(self, z: Tensor) -> Tensor:
+        lh_term    = z @ self.features.T @ self.labels \
+                     - torch.sum(torch.log(1 + torch.exp(z @ self.features.T)))
+        prior_term = -0.5 / self.var * (z ** 2).sum()
+        return lh_term + prior_term
+
+    def U(self, beta: Tensor) -> Tensor:
+        lh_term    = beta @ self.features.T @ self.labels \
+                     - torch.sum(torch.log(1 + torch.exp(beta @ self.features.T)), dim=1)
+        prior_term = -0.5 / self.var * (beta ** 2).sum(dim=1)
+        return -(lh_term + prior_term)
+
+    def sample(self, z_0: Tensor,
+               return_traj: bool = False,
+               return_acceptance: bool = False,
+               progress: bool = False) -> Tensor:
+        B = z_0.shape[0]
+        chains = []
+        accept_rates = []
+
+        for b in range(B):
+            params_init = z_0[b].clone()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                samples = hamiltorch.sample(
+                    log_prob_func        = self.log_prob,
+                    params_init          = params_init,
+                    num_samples          = self.N_run + self.burn,
+                    step_size            = self.step_size,
+                    num_steps_per_sample = 10,
+                    sampler              = hamiltorch.Sampler.HMC_NUTS,
+                    burn                 = self.burn,
+                    desired_accept_rate  = 0.8,
+                )
+            match = self._ACCEPT_RATE_RE.search(buf.getvalue())
+            if match:
+                accept_rates.append(float(match.group(1)))
+            chains.append(torch.stack(samples))
+
+        traj = torch.stack(chains)
+
+        if return_traj:
+            traj = torch.cat([z_0.unsqueeze(1), traj], dim=1)
+
+        if return_acceptance:
+            acc_rate = sum(accept_rates) / len(accept_rates) if accept_rates else float("nan")
+            return traj, acc_rate
+        return traj
+
+
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 
 def acf(chain: Tensor) -> Tensor:
@@ -222,6 +289,11 @@ def min_ess_objective(traj: Tensor, parameters: Tensor) -> Tensor:
     return ess(traj).min(dim=-1).values.mean()
 
 
+def ess_per_l_objective(traj: Tensor, parameters: Tensor) -> Tensor:
+    l = round(parameters.flatten()[0].item())
+    return ess(traj).min(dim=-1).values.mean() / l
+
+
 def target_function(
     parameters      : Tensor,
     sampler_factory : callable,
@@ -264,11 +336,32 @@ def make_rhmc_factory():
     return factory
 
 
+def make_nuts_factory():
+    def factory(parameters: Tensor, N_run: int):
+        p = parameters.flatten()
+        return BLRNUTS(
+            features  = X_train,
+            labels    = y_train,
+            step_size = 10 ** p[0].item(),
+            N_run     = N_run,
+        )
+    return factory
+
+
 # ── Algorithm configs ─────────────────────────────────────────────────────────
+
+NUTS_CONFIG = {
+    "sampler_factory" : make_nuts_factory(),
+    "objective_fn"    : min_ess_objective,
+    "bounds"          : torch.tensor([[-3.], [-0.5]]),
+    "param_names"     : ["log10_step_size"],
+    "discrete_dims"   : [],
+    "state_dim"       : STATE_DIM,
+}
 
 RHMC_CONFIG = {
     "sampler_factory" : make_rhmc_factory(),
-    "objective_fn"    : min_ess_objective,
+    "objective_fn"    : ess_per_l_objective,
     "bounds"          : torch.tensor([[1., -3.], [20., -0.3]]),
     "param_names"     : ["l", "log10_gamma"],
     "discrete_dims"   : [0],
@@ -277,7 +370,7 @@ RHMC_CONFIG = {
 
 FHMC_REDUCED = {
     "sampler_factory" : make_fhmc_unbiased_factory(reduced_flip=True),
-    "objective_fn"    : min_ess_objective,
+    "objective_fn"    : ess_per_l_objective,
     "bounds"          : torch.tensor([[1., -3., 0.], [20., -0.3, 1.]]),
     "param_names"     : ["l", "log10_gamma", "beta"],
     "discrete_dims"   : [0],
@@ -294,6 +387,7 @@ FHMC_NO_FLIP = {
 }
 
 ALGORITHMS = {
+    "NUTS"         : NUTS_CONFIG,
     "RHMC"         : RHMC_CONFIG,
     "FHMC_NO_FLIP" : FHMC_NO_FLIP,
     "FHMC_REDUCED" : FHMC_REDUCED,
@@ -488,7 +582,7 @@ def run_diagnostics(best_x: Tensor, cfg: dict, N_batch: int = 20, N_run: int = 5
 # ── ACF plot ──────────────────────────────────────────────────────────────────
 
 def run_acf_plots(optimal_params: dict, acf_kwargs: dict, max_lag: int = 400):
-    colors     = {"RHMC": "C0", "FHMC_NO_FLIP": "C1", "FHMC_REDUCED": "C2"}
+    colors     = {"NUTS": "C3", "RHMC": "C0", "FHMC_NO_FLIP": "C1", "FHMC_REDUCED": "C2"}
     dim_labels = [r"$\beta_0$", r"$\beta_5$", r"$\beta_{10}$"]
     dim_names  = ["beta0", "beta5", "beta10"]
     dim_indices = [0, 5, 10]
