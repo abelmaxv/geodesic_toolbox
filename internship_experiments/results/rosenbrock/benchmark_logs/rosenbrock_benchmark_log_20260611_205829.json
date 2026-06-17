@@ -1,0 +1,75 @@
+{
+  "NUTS": {
+    "params": {
+      "log10_step_size": -0.5
+    },
+    "min_ess": 34.142268816624906,
+    "ess_per_step": 0.013844858441081409,
+    "ess_per_step_var": 0.00015648940248778588,
+    "ess_per_second": 0.05165664857651593,
+    "ess_per_second_var": 0.0021785139516416916,
+    "ebfmi": 0.9497231298607776,
+    "ebfmi_var": 0.02202700641427646,
+    "rhat_max": 1.4810895115569154,
+    "mcse_max": 0.8639466916473999,
+    "mcse_max_var": 0.6349461979494588,
+    "acceptance_rate": 0.8108000000000003,
+    "flip_rate": null
+  },
+  "RHMC": {
+    "params": {
+      "l": 1.0,
+      "log10_gamma": -0.3
+    },
+    "min_ess": 9.928730365343114,
+    "ess_per_step": 0.004010081911589716,
+    "ess_per_step_var": 4.583050517935831e-06,
+    "ess_per_second": 0.040407211267803916,
+    "ess_per_second_var": 0.00046533520833306287,
+    "ebfmi": 0.3722709217998926,
+    "ebfmi_var": 0.0216903680329059,
+    "rhat_max": 1.295705888827909,
+    "mcse_max": 1.6970918442900114,
+    "mcse_max_var": 3.8233238191517596,
+    "acceptance_rate": 0.90462,
+    "flip_rate": null
+  },
+  "FHMC_NO_FLIP": {
+    "params": {
+      "l": 1.0,
+      "log10_gamma": -0.30000000000000004,
+      "beta": 0.0
+    },
+    "min_ess": 10.537101760245667,
+    "ess_per_step": 0.0032059678771012984,
+    "ess_per_step_var": 3.7425819486553982e-06,
+    "ess_per_second": 0.021328303202375373,
+    "ess_per_second_var": 0.00016564014329986865,
+    "ebfmi": 0.3695151784867285,
+    "ebfmi_var": 0.01636661177684158,
+    "rhat_max": 1.419037403991024,
+    "mcse_max": 2.214648729481094,
+    "mcse_max_var": 3.40969590946642,
+    "acceptance_rate": 0.911,
+    "flip_rate": 0.089
+  },
+  "FHMC_REDUCED": {
+    "params": {
+      "l": 1.0000000000000018,
+      "log10_gamma": -0.3,
+      "beta": 0.0
+    },
+    "min_ess": 8.095227524219734,
+    "ess_per_step": 0.0034036452831669194,
+    "ess_per_step_var": 2.0539174558707594e-06,
+    "ess_per_second": 0.011390680696157755,
+    "ess_per_second_var": 2.3003491332245997e-05,
+    "ebfmi": 0.3915483303758751,
+    "ebfmi_var": 0.0119937078781332,
+    "rhat_max": 1.4229304207670381,
+    "mcse_max": 1.8815969095773863,
+    "mcse_max_var": 2.137892653910354,
+    "acceptance_rate": 0.91547,
+    "flip_rate": 0.03475
+  }
+}
