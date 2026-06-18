@@ -1,0 +1,80 @@
+{
+  "HMC": {
+    "params": {
+      "log10_step_size": -1.4728832615934453
+    },
+    "min_ess": 4.634298895569285,
+    "ess_per_step": 0.002130449548295097,
+    "ess_per_step_var": 4.1428172011695494e-07,
+    "ess_per_second": 0.007039623581818621,
+    "ess_per_second_var": 4.523266099607217e-06,
+    "ebfmi": 0.8646544862136935,
+    "ebfmi_var": 0.10938395911662316,
+    "rhat_max": 1.483278246590735,
+    "mcse_max": 0.2668661404973391,
+    "mcse_max_var": 0.010522325592839018,
+    "acceptance_rate": 0.9192636363636362,
+    "flip_rate": null,
+    "test_accuracy": 0.8397767543792725,
+    "test_accuracy_std": 0.0009340409887954593
+  },
+  "RHMC": {
+    "params": {
+      "log10_gamma": -0.49414502166412533
+    },
+    "min_ess": 58.26758532131089,
+    "ess_per_step": 0.009447179168935947,
+    "ess_per_step_var": 5.191281881136184e-05,
+    "ess_per_second": 0.009292225794367458,
+    "ess_per_second_var": 5.0223828561327706e-05,
+    "ebfmi": 0.017124834445976102,
+    "ebfmi_var": 0.0002387895642250039,
+    "rhat_max": 8.481046219734758,
+    "mcse_max": 0.08091962061219632,
+    "mcse_max_var": 0.0042857147956450745,
+    "acceptance_rate": 0.59137,
+    "flip_rate": null,
+    "test_accuracy": 0.7036160826683044,
+    "test_accuracy_std": 0.18147596716880798
+  },
+  "FHMC_NO_FLIP": {
+    "params": {
+      "log10_gamma": -0.3,
+      "beta": 0.9288373535455918
+    },
+    "min_ess": 266.9885272787131,
+    "ess_per_step": 0.20203679184362636,
+    "ess_per_step_var": 0.10575687342593176,
+    "ess_per_second": 0.16034808277049784,
+    "ess_per_second_var": 0.06661548876285758,
+    "ebfmi": 0.23414140661823435,
+    "ebfmi_var": 0.1076730925322767,
+    "rhat_max": 75.40904018901585,
+    "mcse_max": 0.006229501840865714,
+    "mcse_max_var": 0.0001870026806937256,
+    "acceptance_rate": 0.00054,
+    "flip_rate": 0.99946,
+    "test_accuracy": 0.5149107575416565,
+    "test_accuracy_std": 0.08611871302127838
+  },
+  "FHMC_REDUCED": {
+    "params": {
+      "log10_gamma": -0.3,
+      "beta": 0.9492625570837447
+    },
+    "min_ess": 215.4277243185873,
+    "ess_per_step": 0.22343002101436757,
+    "ess_per_step_var": 0.11643170303480463,
+    "ess_per_second": 0.08672457083614155,
+    "ess_per_second_var": 0.017541733788200804,
+    "ebfmi": 0.26914417636291194,
+    "ebfmi_var": 0.1222059459937145,
+    "rhat_max": 88.93359836649395,
+    "mcse_max": 0.005420234925952863,
+    "mcse_max_var": 0.00016991887776627256,
+    "acceptance_rate": 0.00054,
+    "flip_rate": 0.00033,
+    "test_accuracy": 0.5116517543792725,
+    "test_accuracy_std": 0.07139196246862411
+  }
+}
