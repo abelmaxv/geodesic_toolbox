@@ -25,21 +25,21 @@ warnings.filterwarnings("ignore", message=".*torch.float32.*")
 PARAMS = {
     "HMC": {
         "mass"  : 20,
-        "l"     : 25,
-        "gamma" : 0.46,
+        "l"     : 10,
+        "gamma" : 0.57,
     },
     "RHMC": {
-        "l"     : 2,
+        "l"     : 10,
         "gamma" : 0.57,
     },
     "FHMC": {
-        "beta"  : 0.6,
-        "l"     : 2,
+        "beta"  : 0.4,
+        "l"     : 10,
         "gamma" : 0.57,
     },
     "FHMC_REDUCED": {
-        "beta"  : 0.5,
-        "l"     : 2,
+        "beta"  : 0.4,
+        "l"     : 10,
         "gamma" : 0.57,
     },
 }
@@ -346,7 +346,7 @@ def _run_algorithm_diagnostics(name: str, cfg: dict, params: dict, diag_kwargs: 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    DIAG_KWARGS = dict(N_batch=100, N_run=1000)
+    DIAG_KWARGS = dict(N_batch=100, N_run=2000)
 
     print(f"{'='*55}")
     print("  FIXED SAMPLER PARAMETERS")
