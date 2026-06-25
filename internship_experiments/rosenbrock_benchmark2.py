@@ -165,12 +165,12 @@ class RosenbrockHMC(HMCSampler):
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 
 MAX_LAG = 150  # truncation window for the Geyer estimator below — matches
-                # rosenbrock_sampling.ipynb's max_lag.
+                # rosenbrock_parameters_tunning.ipynb's max_lag.
 
 
 def acf(chain: Tensor, max_lag: int) -> Tensor:
     """Normalized autocorrelation at lags 0..max_lag for a 1D chain — matches
-    rosenbrock_sampling.ipynb's acf()."""
+    rosenbrock_parameters_tunning.ipynb's acf()."""
     chain = chain - chain.mean()
     var = chain.var(unbiased=False)
     return torch.stack([
@@ -183,7 +183,8 @@ def ess_from_chain(chain: Tensor, max_lag: int) -> float:
     """
     ESS = N / IAT,  IAT = 1 + 2 * sum_{k>=1} ACF(k).
     Sum truncated at the first negative lag (Geyer's initial positive
-    sequence) — matches rosenbrock_sampling.ipynb's ess_from_chain exactly.
+    sequence) — matches rosenbrock_parameters_tunning.ipynb's ess_from_chain
+    exactly.
     """
     ac = acf(chain, max_lag)
     neg = ac[1:] < 0
@@ -195,7 +196,8 @@ def ess_from_chain(chain: Tensor, max_lag: int) -> float:
 
 def ess(traj: Tensor, max_lag: int = MAX_LAG) -> Tensor:
     """Per-chain, per-coordinate ESS via ess_from_chain — batched the same way
-    rosenbrock_sampling.ipynb's total_ess/mean_ess loop over chains and dims."""
+    rosenbrock_parameters_tunning.ipynb's total_ess/mean_ess loop over chains
+    and dims."""
     if traj.dim() == 3:
         return torch.stack([ess(traj[b], max_lag) for b in range(traj.shape[0])])
     d = traj.shape[1]
@@ -270,21 +272,13 @@ def compute_diagnostics(
     acceptance_rate : float,
     flip_rate       : float = None,
 ) -> dict:
-    B, _, d = traj.shape
     samples = traj[:, 1:]                 # drop z_0
     N_run, l = samples.shape[1], sampler.l
 
     ess_vals = ess(samples)
     per_chain_min_ess = ess_vals.min(dim=-1).values
 
-    U_vals     = sampler.U(samples.reshape(-1, d)).reshape(B, N_run)
-    delta_U_sq = (U_vals[:, 1:] - U_vals[:, :-1]).pow(2)
-    per_chain_ebfmi = delta_U_sq.mean(dim=1) / U_vals.var(dim=1).clamp(min=1e-10)
-
     rhat = gelman_rubin(samples)
-
-    sd_vals = samples.std(dim=1)
-    per_chain_mcse = (sd_vals / ess_vals.sqrt()).max(dim=-1).values
 
     per_chain_ess_per_step   = per_chain_min_ess / (N_run * l)
     per_chain_ess_per_second = per_chain_min_ess / elapsed
@@ -295,8 +289,6 @@ def compute_diagnostics(
     min_ess,        min_ess_var        = _mean_var(per_chain_min_ess)
     ess_per_step,   ess_per_step_var   = _mean_var(per_chain_ess_per_step)
     ess_per_second, ess_per_second_var = _mean_var(per_chain_ess_per_second)
-    ebfmi_val,      ebfmi_var          = _mean_var(per_chain_ebfmi)
-    mcse_max,       mcse_max_var       = _mean_var(per_chain_mcse)
 
     diag = {
         "acceptance_rate"    : acceptance_rate,
@@ -306,11 +298,7 @@ def compute_diagnostics(
         "ess_per_step_var"   : ess_per_step_var,
         "ess_per_second"     : ess_per_second,
         "ess_per_second_var" : ess_per_second_var,
-        "ebfmi"              : ebfmi_val,
-        "ebfmi_var"          : ebfmi_var,
         "rhat_max"           : rhat.max().item(),
-        "mcse_max"           : mcse_max,
-        "mcse_max_var"       : mcse_max_var,
     }
     if flip_rate is not None:
         diag["flip_rate"] = flip_rate
@@ -380,10 +368,8 @@ def main():
         print(f"{name:15s} | {params_str}")
         print(f"{'':15s}   minESS={d['min_ess']:.2f} (var={d['min_ess_var']:.2e})"
               f" | ESS/step={d['ess_per_step']:.4f} (var={d['ess_per_step_var']:.2e})"
-              f" | ESS/s={d['ess_per_second']:.1f} (var={d['ess_per_second_var']:.2e})"
-              f" | EBFMI={d['ebfmi']:.3f} (var={d['ebfmi_var']:.2e})")
+              f" | ESS/s={d['ess_per_second']:.1f} (var={d['ess_per_second_var']:.2e})")
         print(f"{'':15s}   R-hat={d['rhat_max']:.4f}"
-              f" | MCSE={d['mcse_max']:.4f} (var={d['mcse_max_var']:.2e})"
               f" | acc={d['acceptance_rate']:.3f}{flip_str}")
 
     # Save results
@@ -404,11 +390,7 @@ def main():
             "ess_per_step_var"   : d["ess_per_step_var"],
             "ess_per_second"     : d["ess_per_second"],
             "ess_per_second_var" : d["ess_per_second_var"],
-            "ebfmi"              : d["ebfmi"],
-            "ebfmi_var"          : d["ebfmi_var"],
             "rhat_max"           : d["rhat_max"],
-            "mcse_max"           : d["mcse_max"],
-            "mcse_max_var"       : d["mcse_max_var"],
             "acceptance_rate"    : d["acceptance_rate"],
             "flip_rate"          : d.get("flip_rate", None),
         }
