@@ -2328,10 +2328,11 @@ class RingCometricBump(CoMetric):
        See :class:`CoMetric` for base CoMetric parameters 
     """
 
-    def __init__(self, alpha : torch.Tensor):
+    def __init__(self, alpha : torch.Tensor, scale : float = 1.0):
         super().__init__(is_diag = True)
         assert alpha<1
         self.alpha = alpha
+        self.scale = scale
         
 
     def forward(self, p : torch.Tensor) -> torch.Tensor : 
@@ -2346,7 +2347,7 @@ class RingCometricBump(CoMetric):
         norm = torch.sqrt(torch.sum(p**2, dim = 1, keepdim = True))
         bump_val = bump_fun((1-norm)/self.alpha)
         diags = bump_val.expand(-1,2)
-        return 1/diags
+        return self.scale/diags
 
 def rect_fun(x : torch.Tensor, sigma : torch.Tensor = torch.tensor([0.1]) ) -> torch.Tensor : 
     """ Convolution between a rectangle function and a gaussian of standard deviation sigma
@@ -2508,9 +2509,10 @@ class RandersBumpRotational(RandersMetrics):
 
     def __init__(
         self,
-        beta : float = 1.
+        beta : float = 1.,
+        scale : float = 1.0
         ):
-        cometric = RingCometricBump(0.1)
+        cometric = RingCometricBump(0.1, scale = scale)
         omega = OneForm_dthetaRiemann(cometric)
         super().__init__(cometric, omega, beta)
 
