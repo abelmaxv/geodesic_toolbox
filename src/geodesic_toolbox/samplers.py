@@ -5582,3 +5582,144 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
         if return_acceptance:
             return (z, acceptance_rate, flip_rate) if return_flip else (z, acceptance_rate)
         return (z, flip_rate) if return_flip else z
+
+
+class ImplicitFHMCUnbiased2(ImplicitFHMCUnbiased):
+    """
+    Same as ``ImplicitFHMCUnbiased`` but the implicit leapfrog integrator is
+    driven by ``H_tilde`` (the corrected Randers Hamiltonian, ``K_tilde``)
+    instead of ``H`` (the bare geodesic Hamiltonian ``K``).
+
+    In ``ImplicitFHMCUnbiased`` the integrator gradients ``dH_dz`` / ``dH_dv``
+    are built (in ``ImplicitRHMCSampler.__init__``) from ``self.H``, while the
+    acceptance step uses ``H_tilde``. Here we rebind those gradient closures so
+    the leapfrog steps follow the dynamics of ``H_tilde`` instead. The
+    acceptance step still uses ``H_tilde`` (inherited ``proposal_rate``).
+    """
+
+    def __init__(
+        self,
+        randers_cometric: DualRandersMetrics,
+        l: int,
+        N_fx,
+        gamma: float,
+        N_run: int,
+        bounds: float = 1e3,
+        std_0: float = 1.0,
+        beta_0: float = 1.0,
+        pbar: bool = False,
+        skip_acceptance=False,
+        reduced_flip: bool = True,
+    ):
+        super().__init__(
+            randers_cometric,
+            l,
+            N_fx,
+            gamma,
+            N_run,
+            bounds,
+            std_0,
+            beta_0,
+            pbar,
+            skip_acceptance,
+            reduced_flip,
+        )
+
+        # Rebuild the integrator gradients from H_tilde (K_tilde) instead of H.
+        no_batch_H_tilde = lambda x, y: self.H_tilde(
+            x.unsqueeze(0), y.unsqueeze(0)
+        ).squeeze(0)
+        self._dH_dz = torch.vmap(torch.func.jacrev(no_batch_H_tilde, argnums=0))
+        self._dH_dv = torch.vmap(torch.func.jacrev(no_batch_H_tilde, argnums=1))
+        self.dH_dz = lambda z, v: self._dH_dz(z, v).squeeze(1)
+        self.dH_dv = lambda z, v: self._dH_dv(z, v).squeeze(1)
+
+
+class ImplicitFHMCUnbiased2Reg(ImplicitFHMCUnbiased2):
+    """
+    Same as ``ImplicitFHMCUnbiased2`` (leapfrog driven by H_tilde), but the
+    integrator follows the regularised ``H_tilde_reg`` while the acceptance
+    step keeps the exact ``H_tilde``. Unbiasedness is preserved for any delta.
+    """
+ 
+    def __init__(
+        self,
+        randers_cometric,          # DualRandersMetrics
+        l: int,
+        N_fx,
+        gamma: float,
+        N_run: int,
+        bounds: float = 1e3,
+        std_0: float = 1.0,
+        beta_0: float = 1.0,
+        pbar: bool = False,
+        skip_acceptance=False,
+        reduced_flip: bool = True,
+        delta_rel: float = 0.05,
+    ):
+        super().__init__(
+            randers_cometric,
+            l,
+            N_fx,
+            gamma,
+            N_run,
+            bounds,
+            std_0,
+            beta_0,
+            pbar,
+            skip_acceptance,
+            reduced_flip,
+        )
+        self.delta_rel = delta_rel
+ 
+        # Rebind the integrator gradients to the REGULARISED Hamiltonian.
+        # (proposal_rate is inherited and still calls the exact self.H_tilde,
+        #  so the acceptance step is untouched.)
+        no_batch_H_reg = lambda x, y: self.H_tilde_reg(
+            x.unsqueeze(0), y.unsqueeze(0)
+        ).squeeze(0)
+        self._dH_dz = torch.vmap(torch.func.jacrev(no_batch_H_reg, argnums=0))
+        self._dH_dv = torch.vmap(torch.func.jacrev(no_batch_H_reg, argnums=1))
+        self.dH_dz = lambda z, v: self._dH_dz(z, v).squeeze(1)
+        self.dH_dv = lambda z, v: self._dH_dv(z, v).squeeze(1)
+ 
+    def H_tilde_reg(self, z: Tensor, p: Tensor) -> Tensor:
+        """
+        Smoothed corrected Hamiltonian used ONLY by the integrator:
+ 
+            n_delta   = sqrt(p^T G* p + delta),        delta = delta_rel^2 * d
+            F*_delta  = n_delta + <w*, p>              (>= (1 - beta*) n_delta > 0)
+            H_reg     = 1/2 F*_delta^2 - (d+1) log1p(<w*, p> / n_delta)
+ 
+        Smooth in p everywhere (including p = 0); |grad_p| <= O((d+1)/sqrt(delta)).
+        Recovers self.H_tilde exactly as delta -> 0.
+        """
+        d = z.shape[1]
+        delta = (self.delta_rel ** 2) * d
+ 
+        G_star = self.randers_cometric.G_star(z)
+        w_star = self.randers_cometric.omega_star(z)
+ 
+        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        n_delta = torch.sqrt(p_Gstar_p + delta)
+        wstar_p = torch.einsum("bi,bi->b", w_star, p)
+ 
+        F_delta = n_delta + wstar_p
+        return 0.5 * F_delta**2 - (d + 1) * torch.log1p(wstar_p / n_delta)
+ 
+    def H_tilde(self, z: Tensor, p: Tensor) -> Tensor:
+        """
+        Exact corrected Hamiltonian for the acceptance step, with a tiny norm
+        clamp for NaN safety only (eps = 1e-12, negligible at any momentum the
+        chain actually visits). Overrides the parent to add the clamp.
+        """
+        d = z.shape[1]
+        F_star = self.randers_cometric(z, p)
+        w_star = self.randers_cometric.omega_star(z)
+        G_star = self.randers_cometric.G_star(z)
+        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        riem_norm = torch.sqrt(p_Gstar_p.clamp_min(1e-12))
+        wstar_p = torch.einsum("bi,bi->b", w_star, p)
+        log_randers_factor = torch.log1p(wstar_p / riem_norm)
+        return 0.5 * F_star**2 - (d + 1) * log_randers_factor
+ 
