@@ -1,8 +1,11 @@
+import math
+
 import torch
 from torch import nn
 from tqdm import tqdm
 from torch import Tensor
 from torch.linalg import LinAlgError as _LinAlgError
+from typing import Callable
 
 from .cometric import CoMetric, mat_sqrt, RandersMetrics, DualRandersMetrics
 import warnings
@@ -2305,3176 +2308,1127 @@ class ExplicitRHMCSampler(Sampler):
         return z_0
 
 
-class ExplicitRFHMCSampler(ExplicitRHMCSampler):
+class RandersLeapfrogIntegrator(torch.nn.Module):
     """
-    Explicit Riemannian Hamiltonian Monte Carlo sampler with a pdf defined on a manifold.
-    It uses a Randers metric to propose new samples hence providing
-    time consistent trajectories.
-    It uses the augmented leapfrog integrator to propose new samples from the target distribution.
-    It uses a tempering scheme on the momentum.
-    Here the target distribution is defined by the volume element of the cometric.
-    But this class is easily heritable to define other target distributions. Just redefine
-    the p_target method.
+    Implicit (generalized) leapfrog integrator for a non-separable Hamiltonian
+    H(z, p), operating on the concatenated state x = (z, p). Each step solves
 
-    `Introducing an Explicit Symplectic Integration Scheme for Riemannian Manifold Hamiltonian Monte Carlo`
-    by Cobb et Baydin et al (2019).
+        p_half = p      - dir * gamma/2 * dH_dz(z,     p_half)
+        z_new  = z      + dir * gamma/2 * (dH_dp(z, p_half) + dH_dp(z_new, p_half))
+        p_new  = p_half - dir * gamma/2 * dH_dz(z_new, p_half)
+
+    with Picard fixed-point iterations for the two implicit equations. The map
+    is symplectic, hence exactly volume preserving, so its log-Jacobian is 0; it
+    is returned (as a zeros vector) so this integrator is a drop-in replacement
+    for ``ImplicitMidpointIntegrator`` and can drive the same MCMC loop.
 
     Parameters
     ----------
-    randers : RandersMetrics
-        The Randers metric that defines the target distribution.
-    l : int
-        The number of leapfrog steps.
+    dH_dz : Callable
+        Gradient of the integrated Hamiltonian w.r.t. position, maps
+        (b, d), (b, d) -> (b, d).
+    dH_dp : Callable
+        Gradient of the integrated Hamiltonian w.r.t. momentum, maps
+        (b, d), (b, d) -> (b, d).
     gamma : float
-        The step size.
-    omega : float
-        The binding parameter
-    N_run : int
-        The number of iterations.
-    std_0 : float
-        The standard deviation of the initial momentum.
-    bounds : float
-        The bounds of the target distribution. This is because the distribution must be supported on a bounded set.
-    beta_0 : float
-        The initial temperature for the tempering of the momentum.
-    pbar : bool
-        If True, it shows a progress bar.
-    skip_acceptance : bool
-        If True, the acceptance step is skipped. This can be used when differentiabily is needed.
+        Step size.
+    l : int
+        Number of leapfrog steps.
+    N_fx : int
+        Number of Picard iterations per implicit solve.
+    threshold_fx : float
+        Early-exit tolerance for the fixed-point iterations.
     """
 
     def __init__(
         self,
-        randers: RandersMetrics,
-        l: int,
+        dH_dz: Callable[[Tensor, Tensor], Tensor],
+        dH_dp: Callable[[Tensor, Tensor], Tensor],
         gamma: float,
-        omega: float,
-        N_run: int,
-        bounds: float,
-        std_0: float = 1.0,
-        beta_0: float = 1,
-        pbar: bool = False,
-        skip_acceptance: bool = False,
+        l: int,
+        N_fx: int,
+        threshold_fx: float = 1e-5,
     ):
-        super().__init__(
-            randers.primal_randers.base_cometric,
-            l,
-            gamma,
-            omega,
-            N_run,
-            bounds,
-            std_0,
-            beta_0,
-            pbar,
-            skip_acceptance,
-        )
-        self.randers = randers
-
-    # # Override the kinetic energy function to use the Randers cometric
-    # def K(self, v: Tensor, z: Tensor) -> Tensor:
-    #     """
-    #     Compute the kinetic energy K(v) = - N(v ;0, g(z))
-    #     ie K(v) = 1/2 * v^T g_inv(z) v - 1/2 * log(det(g_inv(z)))
-    #     where g is fundamental tensor of the Randers metric.
-
-    #     Parameters
-    #     ----------
-    #     v : Tensor (b,d)
-    #         The velocity.
-    #     z : Tensor (b,d)
-    #         The position.
-
-    #     Returns
-    #     -------
-    #     kinetic energy : Tensor (b,)
-    #     """
-    #     g_fund = self.randers.fundamental_tensor(z, v)
-    #     g_fund_inv = torch.linalg.inv(g_fund)
-    #     logdet_ginv = torch.logdet(g_fund_inv)
-    #     velocity = torch.einsum("bj,bij,bi->b", v, g_fund_inv, v)
-    #     return 0.5 * velocity - 0.5 * logdet_ginv + 0.5 * v.shape[1] * self.log2pi
-
-    def sample_momentum(self, z: Tensor) -> Tensor:
-        """
-        Sample the momentum from N(0, g(z,omega(z)))
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        v : Tensor (b,d)
-            The sampled momentum.
-        """
-        g = self.cometric.metric_tensor(z)
-        v = torch.randn_like(z)
-        omega = self.randers.omega(z)
-        dot_prod = torch.einsum("bi,bi->b", v, omega)
-        v = torch.sign(dot_prod)[:, None] * v
-        v = -torch.einsum("bij,bi->bj", mat_sqrt(g), v) * self.std_0
-        return v
-
-
-class ImplicitFHMC(ImplicitRHMCSampler):
-    def __init__(
-        self,
-        randers_cometric : DualRandersMetrics, 
-        l : int, 
-        N_fx : float,
-        gamma : float, 
-        N_run : int, 
-        momentum_sampler : str = "exact", #"exact" or "mcmc"
-        momentum_N : int = 50, 
-        momentum_sigma : float = 0.1, 
-        bounds : float = 1e3, 
-        std_0 : float = 1.0, 
-        beta_0 : float = 1.0, 
-        pbar : bool = False, 
-        skip_acceptance = False
-    ):
-        super().__init__(
-            randers_cometric.primal_randers.base_cometric, 
-            l,
-            N_fx,
-            gamma, 
-            N_run, 
-            std_0, 
-            bounds, 
-            beta_0, 
-            pbar, 
-            skip_acceptance
-        )
-        self.momentum_sampler = momentum_sampler
-        self.momentum_N = momentum_N
-        self.momentum_sigma = momentum_sigma
-        self.randers_cometric = randers_cometric
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Null potential energy
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     return torch.zeros(z.shape[0])
-
-    def U(self, z: Tensor) -> Tensor:
-        """
-        Dual Busemann-Hausdorff potential energy
-
-        Args:
-            z: Tensor of shape (n_batch, d)
-
-        Returns:
-            Tensor of shape (n_batch,)
-        """
-        d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            + 0.5 * (d + 1) * torch.log1p(-alpha)
-            + 0.5 * logdet_G_star
-        )
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Gaussian potential energy: negative log-density of N(mu, Sigma)
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-    #     return 0.5 * (z * z).sum(dim=-1) + 0.5 * d * self.log2pi
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Ring-shaped potential on R^2:
-    #         pi(z) ∝ exp(-0.5 * kappa * (||z|| - r0)^2)
-
-    #     Required attributes:
-    #         self.kappa: positive scalar
-    #         self.r0: nonnegative scalar
-    #     """
-    #     r0 = 10.0
-    #     kappa = 0.01
-    #     r = torch.linalg.norm(z, dim=-1)
-    #     return 0.5 * kappa * (r - r0) ** 2
-    
-
-    def K(self, p: Tensor, z: Tensor) -> Tensor:
-        """Compute Kinetic energy in the randers case 
-        K(p) = (
-        1/2 * F_z^*(p)^2
-        - (d+1)/2 * log(1-g^*_inv(omega^*))
-        -1/2 * logdet G^* + d/2 * log 2pi
-        )
-
-        Args:
-            p (Tensor): Momentum vector of shape (n_batch, d)
-            z (Tensor): Position vector of shape (n_batch, d)
-
-        Returns:
-            Tensor: Kinetic energy of shape (n_batch,)
-        """
-        d = z.shape[1]
-        metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-        G_star = self.randers_cometric.G_star(z)          
-        w_star = self.randers_cometric.omega_star(z)     
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            metric_term
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
-            - 0.5 * logdet_G_star
-            + 0.5 * d * self.log2pi
-        )
-
-    def H(self, z: Tensor, p: Tensor) -> Tensor:
-        return 0.5 * self.randers_cometric(z, p) ** 2
-
-    def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
-        """
-        Performs l steps of a symmetric random walk Metropolis sampler for the momentum distribution
-        Args:
-            z0 (Tensor): Initial value/batch of values of shape (batch_size, d).
-            l (int): Number of Metropolis steps to perform.
-            sigma (float): Proposal standard deviation (step size of the Gaussian random walk).
-            w (Tensor): Randers covector of shape (d,).
-
-        Returns:
-            Tensor: Final sample(s) after l Metropolis steps, of shape (batch_size, d).
-        """
-        p = p0.clone()
-        b, d = p.shape
-        n_accept = 0
-        n_total = 0
-
-        if self.cometric.is_diag :
-            M = torch.diag_embed(self.randers_cometric.G_star(z))
-     
-        else : 
-            M = self.randers_cometric.G_star(z)
-        L = torch.linalg.cholesky(M)
-        
-        for _ in range(self.momentum_N): 
-            epsilon = torch.randn(b, d, 1, device=z.device)
-            step_unsq = torch.linalg.solve_triangular(L, epsilon, upper=False)
-            prop = p + self.momentum_sigma * step_unsq.squeeze(-1)
-    
-            log_alpha = self.H_base(z, p) - self.H_base(z, prop)   
-            u = torch.log(torch.rand(b, device=z.device))  
-            mask = (u < log_alpha)  
-
-            n_accept += mask.sum().item()
-            n_total += b
-
-            p = torch.where(mask.unsqueeze(1), prop, p)
-
-        if return_acceptance:
-            acceptance_rate = n_accept / n_total if n_total > 0 else 0.0
-            return p, acceptance_rate
-        else:
-            return p
-
-    def sample_momentum_mcmc(self, z: Tensor) -> Tensor:
-        """ Sample from the Randers-Gaussian distribution 
-        propto exp(-0.5(|p|_g+w^Tp)^2) 
-        using Symetric Random Walk Metropolis Hastings
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        p : Tensor (b,d)
-            The sampled momentum.
-        """
-        p_init = torch.randn_like(z)
-        p, acc = self.momentum_mcmc_sampler(p_init, z, return_acceptance= True)
-        if acc < 0.05 or acc > 0.95:
-            warnings.warn(f"Metropolis momentum sampler has degenerate acceptance rate: {acc:.4f}")
-        return p
-
-    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
-        """
-        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
-
-        Args:
-            u (Tensor): Input points of shape (batch_size, d).
-            mu (Tensor): Mean direction vector of shape (batch_size, d).
-            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
-            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
-
-        Returns:
-            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
-        """
-        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
-
-        rho_ = rho.unsqueeze(-1)  # (B, 1)
-
-        num = (1 - rho_**2) * (u + rho_ * mu)
-        den = 1 + 2 * rho_ * inner_prod + rho_**2
-
-        return num / den + rho_ * mu
-
-
-    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
-        """
-        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
-
-        Args:
-            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
-
-        Returns:
-            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
-            L-induced unit sphere.
-        """
-        batch_size, d, _ = L.shape
-
-        # Sample standard Gaussian
-        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
-
-        # Normalize to Euclidean unit sphere
-        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
-
-        # Solve L^T v = z_unit  (batched)
-        v = torch.linalg.solve_triangular(
-            L.transpose(-1, -2),              
-            z_unit.unsqueeze(-1),             
-            upper=True
-        ).squeeze(-1)                     
-
-        return v
-
-
-
-    def sample_momentum_exact(self, z : Tensor) -> Tensor:
-        """
-        Samples the initial momentum for the FHMC algorithm, exactly according to distribution induced by kinetic energy.
-
-        Args:
-            z (Tensor) : positions of shape (batch_size, d)
-
-        Returns:
-            Tensor: Sampled momentum tensor of shape (batch_size, d).
-            float (optional): If return_stats is True, average number of iterations per sample is also returned.
-        """
-        batch_size, d = z.shape
-
-        # Pre-computations
-        M = self.randers_cometric.G_star(z)
-        w = self.randers_cometric.omega_star(z)
-
-        L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)                                              
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))            
-        zero_mask = beta < 1e-10                                                 
-
-        safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)                         
-        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
-        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-        
-        # Initialize containers for the accepted directions u'
-        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
-        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-        
-        # Acceptance-Rejection for the direction u'
-        while not accepted_mask.all():
-            active_indices = torch.where(~accepted_mask)[0]
-            num_to_sample = len(active_indices)
-            
-            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-            
-            # Moebius transform on the subset
-            u_subset = self.moebius_transform(
-                v_subset, 
-                mu[active_indices], 
-                rho[active_indices], 
-                M[active_indices]
-            )
-            
-           # Bernoulli accept-reject
-            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
-            alpha = torch.rand(num_to_sample, device=z.device) <= p
-            
-            if alpha.any():
-                just_accepted_indices = active_indices[alpha]
-                final_u_prime[just_accepted_indices] = u_subset[alpha]
-                accepted_mask[just_accepted_indices] = True
-                
-        # Sample radius r 
-        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
-        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
-        
-        # Final momentum q = r * u'
-        final_q = r.unsqueeze(-1) * final_u_prime
-        
-        return final_q
-
-    def sample_momentum(self, z: Tensor) -> Tensor:
-        """
-        Sample the momentum at position z according to the configured momentum sampler.
-
-        Parameters
-        ----------
-        z : Tensor
-            The position(s) at which to sample the momentum. Shape (batch_size, d).
-
-        Raises
-        ------
-        ValueError
-            If the provided momentum_sampler string is not one of ['exact', 'mcmc'].
-
-        Returns
-        -------
-        Tensor
-            The sampled momentum at each position in z. Shape (batch_size, d).
-        """
-   
-        if self.momentum_sampler == "exact" : 
-            return self.sample_momentum_exact(z)
-        elif self.momentum_sampler == "mcmc" : 
-            return self.sample_momentum_mcmc(z)
-        else : 
-            raise ValueError(f"Invalid momentum_sampler argument: {self.momentum_sampler}. Must be one of ['exact', 'mcmc'].")
-
-    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Legendre transform for the Randers metric at positions z.
-
-        Args:
-            v:   (batch, d) velocity vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
-        """
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            quad = (v * G * v).sum(-1)
-            Gv = G * v
-        else:
-            quad = torch.einsum("bi,bij,bj->b", v, G, v)
-            Gv = torch.einsum("bij,bj->bi", G, v)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", v, w)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
-
-    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Reversed Legendre transform for the dual Randers metric at positions z.
-
-        Args:
-            p:   (batch, d) momentum vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
-        """
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-
-        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        Gv = torch.einsum("bij,bj->bi", G_star, p)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", p, w_star)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w_star)
-
-
-class ExplicitFHMC(ExplicitRHMCSampler):
-    def __init__(
-        self,
-        randers_cometric : DualRandersMetrics, 
-        l : int, 
-        gamma : float, 
-        omega : float, 
-        N_run : int, 
-        momentum_sampler : str = "exact", #"exact" or "mcmc"
-        momentum_N : int = 50, 
-        momentum_sigma : float = 0.1, 
-        bounds : float = 1e3, 
-        std_0 : float = 1.0, 
-        beta_0 : float = 1.0, 
-        pbar : bool = False, 
-        skip_acceptance = False
-    ):
-        super().__init__(
-            randers_cometric.primal_randers.base_cometric, 
-            l,
-            gamma, 
-            omega, 
-            N_run, 
-            std_0, 
-            bounds, 
-            beta_0, 
-            pbar, 
-            skip_acceptance
-        )
-        self.momentum_sampler = momentum_sampler
-        self.momentum_N = momentum_N
-        self.momentum_sigma = momentum_sigma
-        self.randers_cometric = randers_cometric
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Null potential energy
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     return torch.zeros(z.shape[0])
-
-    def U(self, z: Tensor) -> Tensor:
-        """
-        Dual Busemann-Hausdorff potential energy
-
-        Args:
-            z: Tensor of shape (n_batch, d)
-
-        Returns:
-            Tensor of shape (n_batch,)
-        """
-        d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            + 0.5 * (d + 1) * torch.log1p(-alpha)
-            + 0.5 * logdet_G_star
-        )
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Gaussian potential energy: negative log-density of N(mu, Sigma)
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-    #     return 0.5 * (z * z).sum(dim=-1) + 0.5 * d * self.log2pi
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Ring-shaped potential on R^2:
-    #         pi(z) ∝ exp(-0.5 * kappa * (||z|| - r0)^2)
-
-    #     Required attributes:
-    #         self.kappa: positive scalar
-    #         self.r0: nonnegative scalar
-    #     """
-    #     r0 = 10.0
-    #     kappa = 0.01
-    #     r = torch.linalg.norm(z, dim=-1)
-    #     return 0.5 * kappa * (r - r0) ** 2
-    
-
-    def K(self, p: Tensor, z: Tensor) -> Tensor:
-        """Compute Kinetic energy in the randers case 
-        K(p) = (
-        1/2 * F_z^*(p)^2
-        - (d+1)/2 * log(1-g^*_inv(omega^*))
-        -1/2 * logdet G^* + d/2 * log 2pi
-        )
-
-        Args:
-            p (Tensor): Momentum vector of shape (n_batch, d)
-            z (Tensor): Position vector of shape (n_batch, d)
-
-        Returns:
-            Tensor: Kinetic energy of shape (n_batch,)
-        """
-        d = z.shape[1]
-        metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-        G_star = self.randers_cometric.G_star(z)          
-        w_star = self.randers_cometric.omega_star(z)     
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            metric_term
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
-            - 0.5 * logdet_G_star
-            + 0.5 * d * self.log2pi
-        )
-
-    def H(self, z: Tensor, p: Tensor) -> Tensor:
-        return 0.5 * self.randers_cometric(z, p) ** 2
-
-    def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
-        """
-        Performs l steps of a symmetric random walk Metropolis sampler for the momentum distribution
-        Args:
-            z0 (Tensor): Initial value/batch of values of shape (batch_size, d).
-            l (int): Number of Metropolis steps to perform.
-            sigma (float): Proposal standard deviation (step size of the Gaussian random walk).
-            w (Tensor): Randers covector of shape (d,).
-
-        Returns:
-            Tensor: Final sample(s) after l Metropolis steps, of shape (batch_size, d).
-        """
-        p = p0.clone()
-        b, d = p.shape
-        n_accept = 0
-        n_total = 0
-
-        if self.cometric.is_diag :
-            M = torch.diag_embed(self.randers_cometric.G_star(z))
-     
-        else : 
-            M = self.randers_cometric.G_star(z)
-        L = torch.linalg.cholesky(M)
-        
-        for _ in range(self.momentum_N): 
-            epsilon = torch.randn(b, d, 1, device=z.device)
-            step_unsq = torch.linalg.solve_triangular(L, epsilon, upper=False)
-            prop = p + self.momentum_sigma * step_unsq.squeeze(-1)
-    
-            log_alpha = self.H_base(z, p) - self.H_base(z, prop)   
-            u = torch.log(torch.rand(b, device=z.device))  
-            mask = (u < log_alpha)  
-
-            n_accept += mask.sum().item()
-            n_total += b
-
-            p = torch.where(mask.unsqueeze(1), prop, p)
-
-        if return_acceptance:
-            acceptance_rate = n_accept / n_total if n_total > 0 else 0.0
-            return p, acceptance_rate
-        else:
-            return p
-
-    def sample_momentum_mcmc(self, z: Tensor) -> Tensor:
-        """ Sample from the Randers-Gaussian distribution 
-        propto exp(-0.5(|p|_g+w^Tp)^2) 
-        using Symetric Random Walk Metropolis Hastings
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        p : Tensor (b,d)
-            The sampled momentum.
-        """
-        p_init = torch.randn_like(z)
-        p, acc = self.momentum_mcmc_sampler(p_init, z, return_acceptance= True)
-        if acc < 0.05 or acc > 0.95:
-            warnings.warn(f"Metropolis momentum sampler has degenerate acceptance rate: {acc:.4f}")
-        return p
-
-    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
-        """
-        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
-
-        Args:
-            u (Tensor): Input points of shape (batch_size, d).
-            mu (Tensor): Mean direction vector of shape (batch_size, d).
-            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
-            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
-
-        Returns:
-            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
-        """
-        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
-
-        rho_ = rho.unsqueeze(-1)  # (B, 1)
-
-        num = (1 - rho_**2) * (u + rho_ * mu)
-        den = 1 + 2 * rho_ * inner_prod + rho_**2
-
-        return num / den + rho_ * mu
-
-
-    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
-        """
-        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
-
-        Args:
-            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
-
-        Returns:
-            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
-            L-induced unit sphere.
-        """
-        batch_size, d, _ = L.shape
-
-        # Sample standard Gaussian
-        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
-
-        # Normalize to Euclidean unit sphere
-        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
-
-        # Solve L^T v = z_unit  (batched)
-        v = torch.linalg.solve_triangular(
-            L.transpose(-1, -2),              
-            z_unit.unsqueeze(-1),             
-            upper=True
-        ).squeeze(-1)                     
-
-        return v
-
-
-
-    def sample_momentum_exact(self, z : Tensor) -> Tensor:
-        """
-        Samples the initial momentum for the FHMC algorithm, exactly according to distribution induced by kinetic energy.
-
-        Args:
-            z (Tensor) : positions of shape (batch_size, d)
-
-        Returns:
-            Tensor: Sampled momentum tensor of shape (batch_size, d).
-            float (optional): If return_stats is True, average number of iterations per sample is also returned.
-        """
-        batch_size, d = z.shape
-
-        # Pre-computations
-        M = self.randers_cometric.G_star(z)
-        w = self.randers_cometric.omega_star(z)
-
-        L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)                                              
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))            
-        zero_mask = beta < 1e-10                                                 
-
-        safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)                         
-        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
-        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-        
-        # Initialize containers for the accepted directions u'
-        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
-        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-        
-        # Acceptance-Rejection for the direction u'
-        while not accepted_mask.all():
-            active_indices = torch.where(~accepted_mask)[0]
-            num_to_sample = len(active_indices)
-            
-            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-            
-            # Moebius transform on the subset
-            u_subset = self.moebius_transform(
-                v_subset, 
-                mu[active_indices], 
-                rho[active_indices], 
-                M[active_indices]
-            )
-            
-           # Bernoulli accept-reject
-            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
-            alpha = torch.rand(num_to_sample, device=z.device) <= p
-            
-            if alpha.any():
-                just_accepted_indices = active_indices[alpha]
-                final_u_prime[just_accepted_indices] = u_subset[alpha]
-                accepted_mask[just_accepted_indices] = True
-                
-        # Sample radius r 
-        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
-        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
-        
-        # Final momentum q = r * u'
-        final_q = r.unsqueeze(-1) * final_u_prime
-        
-        return final_q
-
-    def sample_momentum(self, z: Tensor) -> Tensor:
-        """
-        Sample the momentum at position z according to the configured momentum sampler.
-
-        Parameters
-        ----------
-        z : Tensor
-            The position(s) at which to sample the momentum. Shape (batch_size, d).
-
-        Raises
-        ------
-        ValueError
-            If the provided momentum_sampler string is not one of ['exact', 'mcmc'].
-
-        Returns
-        -------
-        Tensor
-            The sampled momentum at each position in z. Shape (batch_size, d).
-        """
-   
-        if self.momentum_sampler == "exact" : 
-            return self.sample_momentum_exact(z)
-        elif self.momentum_sampler == "mcmc" : 
-            return self.sample_momentum_mcmc(z)
-        else : 
-            raise ValueError(f"Invalid momentum_sampler argument: {self.momentum_sampler}. Must be one of ['exact', 'mcmc'].")
-
-    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Legendre transform for the Randers metric at positions z.
-
-        Args:
-            v:   (batch, d) velocity vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
-        """
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            quad = (v * G * v).sum(-1)
-            Gv = G * v
-        else:
-            quad = torch.einsum("bi,bij,bj->b", v, G, v)
-            Gv = torch.einsum("bij,bj->bi", G, v)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", v, w)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
-
-    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Reversed Legendre transform for the dual Randers metric at positions z.
-
-        Args:
-            p:   (batch, d) momentum vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
-        """
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-
-        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        Gv = torch.einsum("bij,bj->bi", G_star, p)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", p, w_star)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w_star)
-
-
-class ImplicitFHMCLegendre(ImplicitRHMCSampler):
-
-    def __init__(
-        self,
-        randers_cometric : DualRandersMetrics, 
-        l : int,
-        N_fx, 
-        gamma : float, 
-        N_run : int, 
-        momentum_sampler : str = "exact", #"exact" or "mcmc"
-        momentum_N : int = 50, 
-        momentum_sigma : float = 0.1, 
-        bounds : float = 1e3, 
-        std_0 : float = 1.0, 
-        beta_0 : float = 1.0, 
-        pbar : bool = False, 
-        skip_acceptance = False
-    ):
-        super().__init__(
-            randers_cometric.primal_randers.base_cometric, 
-            l,
-            N_fx,
-            gamma, 
-            N_run, 
-            std_0, 
-            bounds, 
-            beta_0, 
-            pbar, 
-            skip_acceptance
-        )
-        self.momentum_sampler = momentum_sampler
-        self.momentum_N = momentum_N
-        self.momentum_sigma = momentum_sigma
-        self.randers_cometric = randers_cometric
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Null potential energy
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     return torch.zeros(z.shape[0])
-
-    def U(self, z: Tensor) -> Tensor:
-        """
-        Dual Busemann-Hausdorff potential energy
-
-        Args:
-            z: Tensor of shape (n_batch, d)
-
-        Returns:
-            Tensor of shape (n_batch,)
-        """
-        d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            + 0.5 * (d + 1) * torch.log1p(-alpha)
-            + 0.5 * logdet_G_star
-        )
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Gaussian potential energy: negative log-density of N(mu, Sigma)
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-    #     return 0.5 * (z * z).sum(dim=-1) + 0.5 * d * self.log2pi
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Ring-shaped potential on R^2:
-    #         pi(z) ∝ exp(-0.5 * kappa * (||z|| - r0)^2)
-
-    #     Required attributes:
-    #         self.kappa: positive scalar
-    #         self.r0: nonnegative scalar
-    #     """
-    #     r0 = 10.0
-    #     kappa = 0.01
-    #     r = torch.linalg.norm(z, dim=-1)
-    #     return 0.5 * kappa * (r - r0) ** 2
-    
-
-    # def K(self, p: Tensor, z: Tensor) -> Tensor:
-    #     """Compute Kinetic energy as the negative log of the momentum distribution:
-    #     K(z,p) = -log π(p|z)
-
-    #     where:
-    #         π(p|z) = σ_BH(z) * det(G*(z)) / (2π)^(d/2)
-    #                 * exp(-1/2 * F_z*(p)^2)
-    #                 * (1 + (ω*)^T p / sqrt(p^T G*(z) p))
-
-    #     Expanding -log π(p|z):
-    #         K = 1/2 * F_z*(p)^2
-    #             - (d+1)/2 * log(1 - (ω*)^T (G*)^{-1} ω*)   [from -log σ_BH*]
-    #             - 1/2 * log det G*(z)                        [from -log √det G* inside σ_BH*]
-    #             - log det G*(z)                               [from standalone det G*(z) factor]
-    #             + d/2 * log(2π)
-    #             - log(1 + (ω*)^T p / sqrt(p^T G*(z) p))
-
-    #     Args:
-    #         p (Tensor): Momentum vector of shape (n_batch, d)
-    #         z (Tensor): Position vector of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor: Kinetic energy of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-
-    #     metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-    #     G_star = self.randers_cometric.G_star(z)
-    #     w_star = self.randers_cometric.omega_star(z)
-    #     L = torch.linalg.cholesky(G_star)
-    #     logdet_G = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
-
-    #     # α = (ω*)^T (G*)^{-1} ω*  (for σ_BH* term)
-    #     x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-    #     alpha = torch.einsum("bi,bi->b", w_star, x)
-
-    #     # sqrt(p^T G*(z) p)  — the Riemannian part of F_z*(p)
-    #     p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-    #     riem_norm = torch.sqrt(p_Gstar_p)
-
-    #     # (ω*)^T p
-    #     wstar_p = torch.einsum("bi,bi->b", w_star, p)
-
-    #     # log(1 + (ω*)^T p / ||p||_{G*})
-    #     log_randers_factor = torch.log1p(wstar_p / riem_norm)
-
-    #     return (
-    #         metric_term
-    #         - 0.5 * (d + 1) * torch.log1p(-alpha)   # -log σ_BH* (first part)
-    #         - 1.5 * logdet_G                          # -1/2 log det G* (σ_BH*) - log det G* (π factor)
-    #         + 0.5 * d * self.log2pi
-    #         - log_randers_factor
-    #     )
-
-    def K(self, p: Tensor, z: Tensor) -> Tensor:
-        """Compute Kinetic energy in the randers case 
-        K(p) = (
-        1/2 * F_z^*(p)^2
-        - (d+1)/2 * log(1-g^*_inv(omega^*))
-        -1/2 * logdet G^* + d/2 * log 2pi
-        )
-
-        Args:
-            p (Tensor): Momentum vector of shape (n_batch, d)
-            z (Tensor): Position vector of shape (n_batch, d)
-
-        Returns:
-            Tensor: Kinetic energy of shape (n_batch,)
-        """
-        d = z.shape[1]
-        metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-        G_star = self.randers_cometric.G_star(z)          
-        w_star = self.randers_cometric.omega_star(z)     
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            metric_term
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
-            - 0.5 * logdet_G_star
-            + 0.5 * d * self.log2pi
-        )
-
-    def H(self, z: Tensor, p: Tensor) -> Tensor:
-        return 0.5 * self.randers_cometric(z, p) ** 2
-
-    def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
-        """
-        Performs l steps of a symmetric random walk Metropolis sampler for the momentum distribution
-        Args:
-            z0 (Tensor): Initial value/batch of values of shape (batch_size, d).
-            l (int): Number of Metropolis steps to perform.
-            sigma (float): Proposal standard deviation (step size of the Gaussian random walk).
-            w (Tensor): Randers covector of shape (d,).
-
-        Returns:
-            Tensor: Final sample(s) after l Metropolis steps, of shape (batch_size, d).
-        """
-        p = p0.clone()
-        b, d = p.shape
-        n_accept = 0
-        n_total = 0
-        
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        L = torch.linalg.cholesky(M)
-        
-        for _ in range(self.momentum_N): 
-            epsilon = torch.randn(b, d, 1, device=z.device)
-            step_unsq = torch.linalg.solve_triangular(L, epsilon, upper=False)
-            prop = p + self.momentum_sigma * step_unsq.squeeze(-1)
-    
-            log_alpha = self.H_base(z, p) - self.H_base(z, prop)   
-            u = torch.log(torch.rand(b, device=z.device))  
-            mask = (u < log_alpha)  
-
-            n_accept += mask.sum().item()
-            n_total += b
-
-            p = torch.where(mask.unsqueeze(1), prop, p)
-
-        if return_acceptance:
-            acceptance_rate = n_accept / n_total if n_total > 0 else 0.0
-            return p, acceptance_rate
-        else:
-            return p
-
-    def sample_velocity_mcmc(self, z: Tensor) -> Tensor:
-        """ Sample from the Randers-Gaussian distribution 
-        propto exp(-0.5(|p|_g+w^Tp)^2) 
-        using Symetric Random Walk Metropolis Hastings
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        p : Tensor (b,d)
-            The sampled momentum.
-        """
-        p_init = torch.randn_like(z)
-        p, acc = self.momentum_mcmc_sampler(p_init, z, return_acceptance= True)
-        if acc < 0.05 or acc > 0.95:
-            warnings.warn(f"Metropolis momentum sampler has degenerate acceptance rate: {acc:.4f}")
-        return p
-
-    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
-        """
-        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
-
-        Args:
-            u (Tensor): Input points of shape (batch_size, d).
-            mu (Tensor): Mean direction vector of shape (batch_size, d).
-            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
-            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
-
-        Returns:
-            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
-        """
-        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
-
-        rho_ = rho.unsqueeze(-1)  # (B, 1)
-
-        num = (1 - rho_**2) * (u + rho_ * mu)
-        den = 1 + 2 * rho_ * inner_prod + rho_**2
-
-        return num / den + rho_ * mu
-
-
-    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
-        """
-        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
-
-        Args:
-            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
-
-        Returns:
-            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
-            L-induced unit sphere.
-        """
-        batch_size, d, _ = L.shape
-
-        # Sample standard Gaussian
-        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
-
-        # Normalize to Euclidean unit sphere
-        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
-
-        # Solve L^T v = z_unit  (batched)
-        v = torch.linalg.solve_triangular(
-            L.transpose(-1, -2),              
-            z_unit.unsqueeze(-1),             
-            upper=True
-        ).squeeze(-1)                     
-
-        return v
-
-
-
-    def sample_velocity_exact(self, z : Tensor) -> Tensor:
-        """
-        Samples the initial momentum for the FHMC algorithm, exactly according to distribution induced by kinetic energy.
-
-        Args:
-            z (Tensor) : positions of shape (batch_size, d)
-
-        Returns:
-            Tensor: Sampled momentum tensor of shape (batch_size, d).
-            float (optional): If return_stats is True, average number of iterations per sample is also returned.
-        """
-        batch_size, d = z.shape
-
-        # Pre-computations
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
-        zero_mask = beta < 1e-10
-
-        safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
-        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
-        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-
-        # Initialize containers for the accepted directions u'
-        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
-        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-
-        # Acceptance-Rejection for the direction u'
-        while not accepted_mask.all():
-            active_indices = torch.where(~accepted_mask)[0]
-            num_to_sample = len(active_indices)
-
-            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-
-            # Moebius transform on the subset
-            u_subset = self.moebius_transform(
-                v_subset,
-                mu[active_indices],
-                rho[active_indices],
-                M[active_indices]
-            )
-
-           # Bernoulli accept-reject
-            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
-            alpha = torch.rand(num_to_sample, device=z.device) <= p
-
-            if alpha.any():
-                just_accepted_indices = active_indices[alpha]
-                final_u_prime[just_accepted_indices] = u_subset[alpha]
-                accepted_mask[just_accepted_indices] = True
-
-        # Sample radius r
-        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
-        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
-        
-        # Final momentum q = r * u'
-        final_v = r.unsqueeze(-1) * final_u_prime
-        
-        return final_v
-
-    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Legendre transform for the Randers metric at positions z.
-
-        Args:
-            v:   (batch, d) velocity vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
-        """
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            quad = (v * G * v).sum(-1)
-            Gv = G * v
-        else:
-            quad = torch.einsum("bi,bij,bj->b", v, G, v)
-            Gv = torch.einsum("bij,bj->bi", G, v)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", v, w)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
-
-    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Reversed Legendre transform for the dual Randers metric at positions z.
-
-        Args:
-            p:   (batch, d) momentum vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
-        """
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-
-        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        Gv = torch.einsum("bij,bj->bi", G_star, p)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", p, w_star)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w_star)
-
-    def sample_momentum(self, z: Tensor, momentum_sampler : str | None = None) -> Tensor:
-        """
-        Sample the momentum at position z according to the configured momentum sampler.
-
-        Parameters
-        ----------
-        z : Tensor
-            The position(s) at which to sample the momentum. Shape (batch_size, d).
-
-        Raises
-        ------
-        ValueError
-            If the provided momentum_sampler string is not one of ['exact', 'mcmc'].
-
-        Returns
-        -------
-        Tensor
-            The sampled momentum at each position in z. Shape (batch_size, d).
-        """
-        if momentum_sampler is None : 
-            momentum_sampler = self.momentum_sampler
-        if momentum_sampler == "exact" : 
-            v = self.sample_velocity_exact(z)
-            p = self.legendre(v,z)
-            return p
-        elif self.momentum_sampler == "mcmc" : 
-            v = self.sample_velocity_mcmc(z)
-            p = self.legendre(v,z)
-            return p
-        else : 
-            raise ValueError(f"Invalid momentum_sampler argument: {self.momentum_sampler}. Must be one of ['exact', 'mcmc'].")
-
-
-
-class ExplicitFHMCLegendre(ExplicitRHMCSampler):
-
-    def __init__(
-        self,
-        randers_cometric : DualRandersMetrics, 
-        l : int, 
-        gamma : float, 
-        omega : float, 
-        N_run : int, 
-        momentum_sampler : str = "exact", #"exact" or "mcmc"
-        momentum_N : int = 50, 
-        momentum_sigma : float = 0.1, 
-        bounds : float = 1e3, 
-        std_0 : float = 1.0, 
-        beta_0 : float = 1.0, 
-        pbar : bool = False, 
-        skip_acceptance = False
-    ):
-        super().__init__(
-            randers_cometric.primal_randers.base_cometric, 
-            l,
-            gamma, 
-            omega, 
-            N_run, 
-            std_0, 
-            bounds, 
-            beta_0, 
-            pbar, 
-            skip_acceptance
-        )
-        self.momentum_sampler = momentum_sampler
-        self.momentum_N = momentum_N
-        self.momentum_sigma = momentum_sigma
-        self.randers_cometric = randers_cometric
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Null potential energy
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     return torch.zeros(z.shape[0])
-
-    def U(self, z: Tensor) -> Tensor:
-        """
-        Dual Busemann-Hausdorff potential energy
-
-        Args:
-            z: Tensor of shape (n_batch, d)
-
-        Returns:
-            Tensor of shape (n_batch,)
-        """
-        d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            + 0.5 * (d + 1) * torch.log1p(-alpha)
-            + 0.5 * logdet_G_star
-        )
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Gaussian potential energy: negative log-density of N(mu, Sigma)
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-    #     return 0.5 * (z * z).sum(dim=-1) + 0.5 * d * self.log2pi
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Ring-shaped potential on R^2:
-    #         pi(z) ∝ exp(-0.5 * kappa * (||z|| - r0)^2)
-
-    #     Required attributes:
-    #         self.kappa: positive scalar
-    #         self.r0: nonnegative scalar
-    #     """
-    #     r0 = 10.0
-    #     kappa = 0.01
-    #     r = torch.linalg.norm(z, dim=-1)
-    #     return 0.5 * kappa * (r - r0) ** 2
-    
-
-    # def K(self, p: Tensor, z: Tensor) -> Tensor:
-    #     """Compute Kinetic energy as the negative log of the momentum distribution:
-    #     K(z,p) = -log π(p|z)
-
-    #     where:
-    #         π(p|z) = σ_BH(z) * det(G*(z)) / (2π)^(d/2)
-    #                 * exp(-1/2 * F_z*(p)^2)
-    #                 * (1 + (ω*)^T p / sqrt(p^T G*(z) p))
-
-    #     Expanding -log π(p|z):
-    #         K = 1/2 * F_z*(p)^2
-    #             - (d+1)/2 * log(1 - (ω*)^T (G*)^{-1} ω*)   [from -log σ_BH*]
-    #             - 1/2 * log det G*(z)                        [from -log √det G* inside σ_BH*]
-    #             - log det G*(z)                               [from standalone det G*(z) factor]
-    #             + d/2 * log(2π)
-    #             - log(1 + (ω*)^T p / sqrt(p^T G*(z) p))
-
-    #     Args:
-    #         p (Tensor): Momentum vector of shape (n_batch, d)
-    #         z (Tensor): Position vector of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor: Kinetic energy of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-
-    #     metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-    #     G_star = self.randers_cometric.G_star(z)
-    #     w_star = self.randers_cometric.omega_star(z)
-    #     L = torch.linalg.cholesky(G_star)
-    #     logdet_G = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
-
-    #     # α = (ω*)^T (G*)^{-1} ω*  (for σ_BH* term)
-    #     x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-    #     alpha = torch.einsum("bi,bi->b", w_star, x)
-
-    #     # sqrt(p^T G*(z) p)  — the Riemannian part of F_z*(p)
-    #     p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-    #     riem_norm = torch.sqrt(p_Gstar_p)
-
-    #     # (ω*)^T p
-    #     wstar_p = torch.einsum("bi,bi->b", w_star, p)
-
-    #     # log(1 + (ω*)^T p / ||p||_{G*})
-    #     log_randers_factor = torch.log1p(wstar_p / riem_norm)
-
-    #     return (
-    #         metric_term
-    #         - 0.5 * (d + 1) * torch.log1p(-alpha)   # -log σ_BH* (first part)
-    #         - 1.5 * logdet_G                          # -1/2 log det G* (σ_BH*) - log det G* (π factor)
-    #         + 0.5 * d * self.log2pi
-    #         - log_randers_factor
-    #     )
-
-    def K(self, p: Tensor, z: Tensor) -> Tensor:
-        """Compute Kinetic energy in the randers case 
-        K(p) = (
-        1/2 * F_z^*(p)^2
-        - (d+1)/2 * log(1-g^*_inv(omega^*))
-        -1/2 * logdet G^* + d/2 * log 2pi
-        )
-
-        Args:
-            p (Tensor): Momentum vector of shape (n_batch, d)
-            z (Tensor): Position vector of shape (n_batch, d)
-
-        Returns:
-            Tensor: Kinetic energy of shape (n_batch,)
-        """
-        d = z.shape[1]
-        metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-        G_star = self.randers_cometric.G_star(z)          
-        w_star = self.randers_cometric.omega_star(z)     
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            metric_term
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
-            - 0.5 * logdet_G_star
-            + 0.5 * d * self.log2pi
-        )
-
-    def H(self, z: Tensor, p: Tensor) -> Tensor:
-        return 0.5 * self.randers_cometric(z, p) ** 2
-
-    def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
-        """
-        Performs l steps of a symmetric random walk Metropolis sampler for the momentum distribution
-        Args:
-            z0 (Tensor): Initial value/batch of values of shape (batch_size, d).
-            l (int): Number of Metropolis steps to perform.
-            sigma (float): Proposal standard deviation (step size of the Gaussian random walk).
-            w (Tensor): Randers covector of shape (d,).
-
-        Returns:
-            Tensor: Final sample(s) after l Metropolis steps, of shape (batch_size, d).
-        """
-        p = p0.clone()
-        b, d = p.shape
-        n_accept = 0
-        n_total = 0
-        
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        L = torch.linalg.cholesky(M)
-        
-        for _ in range(self.momentum_N): 
-            epsilon = torch.randn(b, d, 1, device=z.device)
-            step_unsq = torch.linalg.solve_triangular(L, epsilon, upper=False)
-            prop = p + self.momentum_sigma * step_unsq.squeeze(-1)
-    
-            log_alpha = self.H_base(z, p) - self.H_base(z, prop)   
-            u = torch.log(torch.rand(b, device=z.device))  
-            mask = (u < log_alpha)  
-
-            n_accept += mask.sum().item()
-            n_total += b
-
-            p = torch.where(mask.unsqueeze(1), prop, p)
-
-        if return_acceptance:
-            acceptance_rate = n_accept / n_total if n_total > 0 else 0.0
-            return p, acceptance_rate
-        else:
-            return p
-
-    def sample_velocity_mcmc(self, z: Tensor) -> Tensor:
-        """ Sample from the Randers-Gaussian distribution 
-        propto exp(-0.5(|p|_g+w^Tp)^2) 
-        using Symetric Random Walk Metropolis Hastings
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        p : Tensor (b,d)
-            The sampled momentum.
-        """
-        p_init = torch.randn_like(z)
-        p, acc = self.momentum_mcmc_sampler(p_init, z, return_acceptance= True)
-        if acc < 0.05 or acc > 0.95:
-            warnings.warn(f"Metropolis momentum sampler has degenerate acceptance rate: {acc:.4f}")
-        return p
-
-    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
-        """
-        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
-
-        Args:
-            u (Tensor): Input points of shape (batch_size, d).
-            mu (Tensor): Mean direction vector of shape (batch_size, d).
-            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
-            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
-
-        Returns:
-            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
-        """
-        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
-
-        rho_ = rho.unsqueeze(-1)  # (B, 1)
-
-        num = (1 - rho_**2) * (u + rho_ * mu)
-        den = 1 + 2 * rho_ * inner_prod + rho_**2
-
-        return num / den + rho_ * mu
-
-
-    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
-        """
-        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
-
-        Args:
-            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
-
-        Returns:
-            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
-            L-induced unit sphere.
-        """
-        batch_size, d, _ = L.shape
-
-        # Sample standard Gaussian
-        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
-
-        # Normalize to Euclidean unit sphere
-        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
-
-        # Solve L^T v = z_unit  (batched)
-        v = torch.linalg.solve_triangular(
-            L.transpose(-1, -2),              
-            z_unit.unsqueeze(-1),             
-            upper=True
-        ).squeeze(-1)                     
-
-        return v
-
-
-
-    def sample_velocity_exact(self, z : Tensor) -> Tensor:
-        """
-        Samples the initial momentum for the FHMC algorithm, exactly according to distribution induced by kinetic energy.
-
-        Args:
-            z (Tensor) : positions of shape (batch_size, d)
-
-        Returns:
-            Tensor: Sampled momentum tensor of shape (batch_size, d).
-            float (optional): If return_stats is True, average number of iterations per sample is also returned.
-        """
-        batch_size, d = z.shape
-
-        # Pre-computations
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
-        zero_mask = beta < 1e-10
-
-        safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
-        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
-        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-
-        # Initialize containers for the accepted directions u'
-        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
-        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-
-        # Acceptance-Rejection for the direction u'
-        while not accepted_mask.all():
-            active_indices = torch.where(~accepted_mask)[0]
-            num_to_sample = len(active_indices)
-
-            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-
-            # Moebius transform on the subset
-            u_subset = self.moebius_transform(
-                v_subset,
-                mu[active_indices],
-                rho[active_indices],
-                M[active_indices]
-            )
-
-           # Bernoulli accept-reject
-            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
-            alpha = torch.rand(num_to_sample, device=z.device) <= p
-
-            if alpha.any():
-                just_accepted_indices = active_indices[alpha]
-                final_u_prime[just_accepted_indices] = u_subset[alpha]
-                accepted_mask[just_accepted_indices] = True
-
-        # Sample radius r
-        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
-        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
-        
-        # Final momentum q = r * u'
-        final_v = r.unsqueeze(-1) * final_u_prime
-        
-        return final_v
-
-    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Legendre transform for the Randers metric at positions z.
-
-        Args:
-            v:   (batch, d) velocity vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
-        """
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            quad = (v * G * v).sum(-1)
-            Gv = G * v
-        else:
-            quad = torch.einsum("bi,bij,bj->b", v, G, v)
-            Gv = torch.einsum("bij,bj->bi", G, v)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", v, w)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
-
-    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Reversed Legendre transform for the dual Randers metric at positions z.
-
-        Args:
-            p:   (batch, d) momentum vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
-        """
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-
-        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        Gv = torch.einsum("bij,bj->bi", G_star, p)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", p, w_star)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w_star)
-
-    def sample_momentum(self, z: Tensor, momentum_sampler : str | None = None) -> Tensor:
-        """
-        Sample the momentum at position z according to the configured momentum sampler.
-
-        Parameters
-        ----------
-        z : Tensor
-            The position(s) at which to sample the momentum. Shape (batch_size, d).
-
-        Raises
-        ------
-        ValueError
-            If the provided momentum_sampler string is not one of ['exact', 'mcmc'].
-
-        Returns
-        -------
-        Tensor
-            The sampled momentum at each position in z. Shape (batch_size, d).
-        """
-        if momentum_sampler is None : 
-            momentum_sampler = self.momentum_sampler
-        if momentum_sampler == "exact" : 
-            v = self.sample_velocity_exact(z)
-            p = self.legendre(v,z)
-            return p
-        elif self.momentum_sampler == "mcmc" : 
-            v = self.sample_velocity_mcmc(z)
-            p = self.legendre(v,z)
-            return p
-        else : 
-            raise ValueError(f"Invalid momentum_sampler argument: {self.momentum_sampler}. Must be one of ['exact', 'mcmc'].")
-
-
-class ImplicitFHMCLegendreBis(ImplicitRHMCSampler):
-
-    def __init__(
-        self,
-        randers_cometric : DualRandersMetrics, 
-        l : int,
-        N_fx, 
-        gamma : float, 
-        N_run : int, 
-        momentum_sampler : str = "exact", #"exact" or "mcmc"
-        momentum_N : int = 50, 
-        momentum_sigma : float = 0.1, 
-        bounds : float = 1e3, 
-        std_0 : float = 1.0, 
-        beta_0 : float = 1.0, 
-        pbar : bool = False, 
-        skip_acceptance = False
-    ):
-        super().__init__(
-            randers_cometric.primal_randers.base_cometric, 
-            l,
-            N_fx,
-            gamma, 
-            N_run, 
-            std_0, 
-            bounds, 
-            beta_0, 
-            pbar, 
-            skip_acceptance
-        )
-        self.momentum_sampler = momentum_sampler
-        self.momentum_N = momentum_N
-        self.momentum_sigma = momentum_sigma
-        self.randers_cometric = randers_cometric
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Null potential energy
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     return torch.zeros(z.shape[0])
-
-    def U(self, z: Tensor) -> Tensor:
-        """
-        Busemann-Hausdorff potential energy
-
-        Args:
-            z: Tensor of shape (n_batch, d)
-
-        Returns:
-            Tensor of shape (n_batch,)
-        """
-        d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z) 
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag == True:      
-            G = torch.diag_embed(G) 
-        w_star = self.randers_cometric.omega_star(z)     
-        L = torch.linalg.cholesky(G_star)
-        L_primal = torch.linalg.cholesky(G)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
-            - 0.5 * logdet_G
-        )
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Gaussian potential energy: negative log-density of N(mu, Sigma)
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-    #     return 0.5 * (z * z).sum(dim=-1) + 0.5 * d * self.log2pi
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Ring-shaped potential on R^2:
-    #         pi(z) ∝ exp(-0.5 * kappa * (||z|| - r0)^2)
-
-    #     Required attributes:
-    #         self.kappa: positive scalar
-    #         self.r0: nonnegative scalar
-    #     """
-    #     r0 = 10.0
-    #     kappa = 0.01
-    #     r = torch.linalg.norm(z, dim=-1)
-    #     return 0.5 * kappa * (r - r0) ** 2
-    
-
-    def K(self, p: Tensor, z: Tensor) -> Tensor:
-        """Compute kinetic energy K(z,p) = -log π(p|z), where π(p|z) is the
-        pushforward under the Legendre transform of the velocity distribution
-        π(v|z) = σ_BH(z) / (2π)^(d/2) · exp(-1/2 F_z(v)^2).
-
-        Combining
-            - the Bao-Chern-Shen determinant identity
-                det g_{F*}(z,p) = (F*(p) / ||p||_{G*})^(d+1) · det G*(z),
-            - the Randers volume identity (matrix determinant lemma)
-                σ_BH(z) · det G*(z) = √det G*(z),
-                i.e.   σ_BH(z) = 1 / √det G*(z),
-        yields the closed form:
-
-            K(z,p) = 1/2 · F*(z,p)^2
-                    - (d+1) · log(F*(z,p) / ||p||_{G*})
-                    + 1/2 · log det G(z)
-                    + d/2 · log(2π).
-
-        Sanity check: in the Riemannian limit (ω* = 0), F*(p) = ||p||_{G*}, the
-        log-ratio term vanishes, and K reduces to the standard Riemannian
-        kinetic energy 1/2·p^T G*(z)·p + 1/2·log det G(z) + d/2·log(2π).
-
-        Args:
-            p (Tensor): Momentum vector of shape (b, d).
-            z (Tensor): Position vector of shape (b, d).
-
-        Returns:
-            Tensor: Kinetic energy of shape (b,).
-        """
-        d = z.shape[1]
-
-        # F*(z, p) — dual Randers norm (regularized inside the metric class)
-        F_star = self.randers_cometric(z, p)
-
-        # G*(z), ω*(z), and log det G*(z) via Cholesky
-        G_star = self.randers_cometric.G_star(z)
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag == True : 
-            G = torch.diag_embed(G)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        L_primal = torch.linalg.cholesky(G)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
-
-        # Riemannian dual norm  ||p||_{G*} = sqrt(p^T G* p)
-        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        riem_norm = torch.sqrt(p_Gstar_p)
-
-        # log(F* / ||p||_{G*}) = log(1 + (ω*)^T p / ||p||_{G*})
-        wstar_p = torch.einsum("bi,bi->b", w_star, p)
-        log_randers_factor = torch.log1p(wstar_p / riem_norm)
-
-        return (
-            0.5 * F_star**2
-            + 0.5 * (d + 1) * torch.log1p(-alpha)
-            - (d + 1) * log_randers_factor
-            + 0.5 * logdet_G
-            + 0.5 * d * self.log2pi
-        )
-
-    def H(self, z : Tensor, p : Tensor) -> Tensor : 
-        d = z.shape[1]
-        F_star = self.randers_cometric(z, p)
-        w_star = self.randers_cometric.omega_star(z)
-        G_star = self.randers_cometric.G_star(z)
-        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        riem_norm = torch.sqrt(p_Gstar_p)
-        wstar_p = torch.einsum("bi,bi->b", w_star, p)
-        log_randers_factor = torch.log1p(wstar_p / riem_norm)
-        return 0.5 * F_star**2-(d + 1) * log_randers_factor
-
-
-    def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
-        """
-        Performs l steps of a symmetric random walk Metropolis sampler for the momentum distribution
-        Args:
-            z0 (Tensor): Initial value/batch of values of shape (batch_size, d).
-            l (int): Number of Metropolis steps to perform.
-            sigma (float): Proposal standard deviation (step size of the Gaussian random walk).
-            w (Tensor): Randers covector of shape (d,).
-
-        Returns:
-            Tensor: Final sample(s) after l Metropolis steps, of shape (batch_size, d).
-        """
-        p = p0.clone()
-        b, d = p.shape
-        n_accept = 0
-        n_total = 0
-        
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        L = torch.linalg.cholesky(M)
-        
-        for _ in range(self.momentum_N): 
-            epsilon = torch.randn(b, d, 1, device=z.device)
-            step_unsq = torch.linalg.solve_triangular(L, epsilon, upper=False)
-            prop = p + self.momentum_sigma * step_unsq.squeeze(-1)
-    
-            log_alpha = self.H_base(z, p) - self.H_base(z, prop)   
-            u = torch.log(torch.rand(b, device=z.device))  
-            mask = (u < log_alpha)  
-
-            n_accept += mask.sum().item()
-            n_total += b
-
-            p = torch.where(mask.unsqueeze(1), prop, p)
-
-        if return_acceptance:
-            acceptance_rate = n_accept / n_total if n_total > 0 else 0.0
-            return p, acceptance_rate
-        else:
-            return p
-
-    def sample_velocity_mcmc(self, z: Tensor) -> Tensor:
-        """ Sample from the Randers-Gaussian distribution 
-        propto exp(-0.5(|p|_g+w^Tp)^2) 
-        using Symetric Random Walk Metropolis Hastings
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        p : Tensor (b,d)
-            The sampled momentum.
-        """
-        p_init = torch.randn_like(z)
-        p, acc = self.momentum_mcmc_sampler(p_init, z, return_acceptance= True)
-        if acc < 0.05 or acc > 0.95:
-            warnings.warn(f"Metropolis momentum sampler has degenerate acceptance rate: {acc:.4f}")
-        return p
-
-    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
-        """
-        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
-
-        Args:
-            u (Tensor): Input points of shape (batch_size, d).
-            mu (Tensor): Mean direction vector of shape (batch_size, d).
-            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
-            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
-
-        Returns:
-            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
-        """
-        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
-
-        rho_ = rho.unsqueeze(-1)  # (B, 1)
-
-        num = (1 - rho_**2) * (u + rho_ * mu)
-        den = 1 + 2 * rho_ * inner_prod + rho_**2
-
-        return num / den + rho_ * mu
-
-
-    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
-        """
-        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
-
-        Args:
-            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
-
-        Returns:
-            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
-            L-induced unit sphere.
-        """
-        batch_size, d, _ = L.shape
-
-        # Sample standard Gaussian
-        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
-
-        # Normalize to Euclidean unit sphere
-        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
-
-        # Solve L^T v = z_unit  (batched)
-        v = torch.linalg.solve_triangular(
-            L.transpose(-1, -2),              
-            z_unit.unsqueeze(-1),             
-            upper=True
-        ).squeeze(-1)                     
-
-        return v
-
-
-
-    def sample_velocity_exact(self, z : Tensor) -> Tensor:
-        """
-        Samples the initial momentum for the FHMC algorithm, exactly according to distribution induced by kinetic energy.
-
-        Args:
-            z (Tensor) : positions of shape (batch_size, d)
-
-        Returns:
-            Tensor: Sampled momentum tensor of shape (batch_size, d).
-            float (optional): If return_stats is True, average number of iterations per sample is also returned.
-        """
-        batch_size, d = z.shape
-
-        # Pre-computations
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
-        zero_mask = beta < 1e-10
-
-        safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
-        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
-        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-
-        # Initialize containers for the accepted directions u'
-        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
-        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-
-        # Acceptance-Rejection for the direction u'
-        while not accepted_mask.all():
-            active_indices = torch.where(~accepted_mask)[0]
-            num_to_sample = len(active_indices)
-
-            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-
-            # Moebius transform on the subset
-            u_subset = self.moebius_transform(
-                v_subset,
-                mu[active_indices],
-                rho[active_indices],
-                M[active_indices]
-            )
-
-           # Bernoulli accept-reject
-            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
-            alpha = torch.rand(num_to_sample, device=z.device) <= p
-
-            if alpha.any():
-                just_accepted_indices = active_indices[alpha]
-                final_u_prime[just_accepted_indices] = u_subset[alpha]
-                accepted_mask[just_accepted_indices] = True
-
-        # Sample radius r
-        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
-        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
-        
-        # Final momentum q = r * u'
-        final_v = r.unsqueeze(-1) * final_u_prime
-        
-        return final_v
-
-    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Legendre transform for the Randers metric at positions z.
-
-        Args:
-            v:   (batch, d) velocity vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
-        """
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            quad = (v * G * v).sum(-1)
-            Gv = G * v
-        else:
-            quad = torch.einsum("bi,bij,bj->b", v, G, v)
-            Gv = torch.einsum("bij,bj->bi", G, v)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", v, w)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
-
-    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Reversed Legendre transform for the dual Randers metric at positions z.
-
-        Args:
-            p:   (batch, d) momentum vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
-        """
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-
-        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        Gv = torch.einsum("bij,bj->bi", G_star, p)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", p, w_star)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w_star)
-
-    def sample_momentum(self, z: Tensor, momentum_sampler : str | None = None) -> Tensor:
-        """
-        Sample the momentum at position z according to the configured momentum sampler.
-
-        Parameters
-        ----------
-        z : Tensor
-            The position(s) at which to sample the momentum. Shape (batch_size, d).
-
-        Raises
-        ------
-        ValueError
-            If the provided momentum_sampler string is not one of ['exact', 'mcmc'].
-
-        Returns
-        -------
-        Tensor
-            The sampled momentum at each position in z. Shape (batch_size, d).
-        """
-        if momentum_sampler is None : 
-            momentum_sampler = self.momentum_sampler
-        if momentum_sampler == "exact" : 
-            v = self.sample_velocity_exact(z)
-            p = self.legendre(v,z)
-            return p
-        elif self.momentum_sampler == "mcmc" : 
-            v = self.sample_velocity_mcmc(z)
-            p = self.legendre(v,z)
-            return p
-        else : 
-            raise ValueError(f"Invalid momentum_sampler argument: {self.momentum_sampler}. Must be one of ['exact', 'mcmc'].")
-
-
-class ExplicitFHMCLegendreBis(ExplicitRHMCSampler):
-
-    def __init__(
-        self,
-        randers_cometric : DualRandersMetrics, 
-        l : int, 
-        gamma : float, 
-        omega : float, 
-        N_run : int, 
-        momentum_sampler : str = "exact", #"exact" or "mcmc"
-        momentum_N : int = 50, 
-        momentum_sigma : float = 0.1, 
-        bounds : float = 1e3, 
-        std_0 : float = 1.0, 
-        beta_0 : float = 1.0, 
-        pbar : bool = False, 
-        skip_acceptance = False
-    ):
-        super().__init__(
-            randers_cometric.primal_randers.base_cometric, 
-            l,
-            gamma, 
-            omega, 
-            N_run, 
-            std_0, 
-            bounds, 
-            beta_0, 
-            pbar, 
-            skip_acceptance
-        )
-        self.momentum_sampler = momentum_sampler
-        self.momentum_N = momentum_N
-        self.momentum_sigma = momentum_sigma
-        self.randers_cometric = randers_cometric
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Null potential energy
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     return torch.zeros(z.shape[0])
-
-    def U(self, z: Tensor) -> Tensor:
-        """
-        Busemann-Hausdorff potential energy
-
-        Args:
-            z: Tensor of shape (n_batch, d)
-
-        Returns:
-            Tensor of shape (n_batch,)
-        """
-        d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z) 
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag == True:      
-            G = torch.diag_embed(G) 
-        w_star = self.randers_cometric.omega_star(z)     
-        L = torch.linalg.cholesky(G_star)
-        L_primal = torch.linalg.cholesky(G)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
-            - 0.5 * logdet_G
-        )
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Gaussian potential energy: negative log-density of N(mu, Sigma)
-
-    #     Args:
-    #         z: Tensor of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-    #     return 0.5 * (z * z).sum(dim=-1) + 0.5 * d * self.log2pi
-
-    # def U(self, z: Tensor) -> Tensor:
-    #     """
-    #     Ring-shaped potential on R^2:
-    #         pi(z) ∝ exp(-0.5 * kappa * (||z|| - r0)^2)
-
-    #     Required attributes:
-    #         self.kappa: positive scalar
-    #         self.r0: nonnegative scalar
-    #     """
-    #     r0 = 10.0
-    #     kappa = 0.01
-    #     r = torch.linalg.norm(z, dim=-1)
-    #     return 0.5 * kappa * (r - r0) ** 2
-    
-
-    def K(self, p: Tensor, z: Tensor) -> Tensor:
-        """Compute kinetic energy K(z,p) = -log π(p|z), where π(p|z) is the
-        pushforward under the Legendre transform of the velocity distribution
-        π(v|z) = σ_BH(z) / (2π)^(d/2) · exp(-1/2 F_z(v)^2).
-
-        Combining
-            - the Bao-Chern-Shen determinant identity
-                det g_{F*}(z,p) = (F*(p) / ||p||_{G*})^(d+1) · det G*(z),
-            - the Randers volume identity (matrix determinant lemma)
-                σ_BH(z) · det G*(z) = √det G*(z),
-                i.e.   σ_BH(z) = 1 / √det G*(z),
-        yields the closed form:
-
-            K(z,p) = 1/2 · F*(z,p)^2
-                    - (d+1) · log(F*(z,p) / ||p||_{G*})
-                    + 1/2 · log det G(z)
-                    + d/2 · log(2π).
-
-        Sanity check: in the Riemannian limit (ω* = 0), F*(p) = ||p||_{G*}, the
-        log-ratio term vanishes, and K reduces to the standard Riemannian
-        kinetic energy 1/2·p^T G*(z)·p + 1/2·log det G(z) + d/2·log(2π).
-
-        Args:
-            p (Tensor): Momentum vector of shape (b, d).
-            z (Tensor): Position vector of shape (b, d).
-
-        Returns:
-            Tensor: Kinetic energy of shape (b,).
-        """
-        d = z.shape[1]
-
-        # F*(z, p) — dual Randers norm (regularized inside the metric class)
-        F_star = self.randers_cometric(z, p)
-
-        # G*(z), ω*(z), and log det G*(z) via Cholesky
-        G_star = self.randers_cometric.G_star(z)
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag == True : 
-            G = torch.diag_embed(G)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        L_primal = torch.linalg.cholesky(G)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G = 2.0 * torch.diagonal(L_primal, dim1=-2, dim2=-1).log().sum(-1)
-
-        # Riemannian dual norm  ||p||_{G*} = sqrt(p^T G* p)
-        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        riem_norm = torch.sqrt(p_Gstar_p)
-
-        # log(F* / ||p||_{G*}) = log(1 + (ω*)^T p / ||p||_{G*})
-        wstar_p = torch.einsum("bi,bi->b", w_star, p)
-        log_randers_factor = torch.log1p(wstar_p / riem_norm)
-
-        return (
-            0.5 * F_star**2
-            + 0.5 * (d + 1) * torch.log1p(-alpha)
-            - (d + 1) * log_randers_factor
-            + 0.5 * logdet_G
-            + 0.5 * d * self.log2pi
-        )
-
-    def H(self, z: Tensor, p: Tensor) -> Tensor:
-        d = z.shape[1]
-        F_star = self.randers_cometric(z, p)
-        w_star = self.randers_cometric.omega_star(z)
-        G_star = self.randers_cometric.G_star(z)
-        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        riem_norm = torch.sqrt(p_Gstar_p)
-        wstar_p = torch.einsum("bi,bi->b", w_star, p)
-        log_randers_factor = torch.log1p(wstar_p / riem_norm)
-        return 0.5 * F_star**2 - (d + 1) * log_randers_factor
-
-    # def K(self, p: Tensor, z: Tensor) -> Tensor:
-    #     """Compute Kinetic energy in the randers case
-    #     K(p) = (
-    #     1/2 * F_z^*(p)^2
-    #     - (d+1)/2 * log(1-g^*_inv(omega^*))
-    #     -1/2 * logdet G^* + d/2 * log 2pi
-    #     )
-
-    #     Args:
-    #         p (Tensor): Momentum vector of shape (n_batch, d)
-    #         z (Tensor): Position vector of shape (n_batch, d)
-
-    #     Returns:
-    #         Tensor: Kinetic energy of shape (n_batch,)
-    #     """
-    #     d = z.shape[1]
-
-    #     metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-    #     G_star = self.randers_cometric.G_star(z)          
-    #     w_star = self.randers_cometric.omega_star(z)     
-    #     L = torch.linalg.cholesky(G_star)
-    #     x = torch.cholesky_solve(w_star.unsqueeze(-1), L).squeeze(-1)
-    #     alpha = torch.einsum("bi,bi->b", w_star, x)
-    #     logdet_G = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(dim=-1)
-
-    #     return (
-    #         metric_term
-    #         - 0.5 * (d + 1) * torch.log1p(-alpha)
-    #         - 0.5 * logdet_G
-    #         + 0.5 * d * self.log2pi
-    #     )
-
-
-    def momentum_mcmc_sampler(self, p0 : Tensor, z : torch.Tensor, return_acceptance : bool = False )-> Tensor :
-        """
-        Performs l steps of a symmetric random walk Metropolis sampler for the momentum distribution
-        Args:
-            z0 (Tensor): Initial value/batch of values of shape (batch_size, d).
-            l (int): Number of Metropolis steps to perform.
-            sigma (float): Proposal standard deviation (step size of the Gaussian random walk).
-            w (Tensor): Randers covector of shape (d,).
-
-        Returns:
-            Tensor: Final sample(s) after l Metropolis steps, of shape (batch_size, d).
-        """
-        p = p0.clone()
-        b, d = p.shape
-        n_accept = 0
-        n_total = 0
-        
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        L = torch.linalg.cholesky(M)
-        
-        for _ in range(self.momentum_N): 
-            epsilon = torch.randn(b, d, 1, device=z.device)
-            step_unsq = torch.linalg.solve_triangular(L, epsilon, upper=False)
-            prop = p + self.momentum_sigma * step_unsq.squeeze(-1)
-    
-            log_alpha = self.H_base(z, p) - self.H_base(z, prop)   
-            u = torch.log(torch.rand(b, device=z.device))  
-            mask = (u < log_alpha)  
-
-            n_accept += mask.sum().item()
-            n_total += b
-
-            p = torch.where(mask.unsqueeze(1), prop, p)
-
-        if return_acceptance:
-            acceptance_rate = n_accept / n_total if n_total > 0 else 0.0
-            return p, acceptance_rate
-        else:
-            return p
-
-    def sample_velocity_mcmc(self, z: Tensor) -> Tensor:
-        """ Sample from the Randers-Gaussian distribution 
-        propto exp(-0.5(|p|_g+w^Tp)^2) 
-        using Symetric Random Walk Metropolis Hastings
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-
-        Returns
-        -------
-        p : Tensor (b,d)
-            The sampled momentum.
-        """
-        p_init = torch.randn_like(z)
-        p, acc = self.momentum_mcmc_sampler(p_init, z, return_acceptance= True)
-        if acc < 0.05 or acc > 0.95:
-            warnings.warn(f"Metropolis momentum sampler has degenerate acceptance rate: {acc:.4f}")
-        return p
-
-    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
-        """
-        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
-
-        Args:
-            u (Tensor): Input points of shape (batch_size, d).
-            mu (Tensor): Mean direction vector of shape (batch_size, d).
-            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
-            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
-
-        Returns:
-            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
-        """
-        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
-
-        rho_ = rho.unsqueeze(-1)  # (B, 1)
-
-        num = (1 - rho_**2) * (u + rho_ * mu)
-        den = 1 + 2 * rho_ * inner_prod + rho_**2
-
-        return num / den + rho_ * mu
-
-
-    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
-        """
-        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
-
-        Args:
-            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
-
-        Returns:
-            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
-            L-induced unit sphere.
-        """
-        batch_size, d, _ = L.shape
-
-        # Sample standard Gaussian
-        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
-
-        # Normalize to Euclidean unit sphere
-        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
-
-        # Solve L^T v = z_unit  (batched)
-        v = torch.linalg.solve_triangular(
-            L.transpose(-1, -2),              
-            z_unit.unsqueeze(-1),             
-            upper=True
-        ).squeeze(-1)                     
-
-        return v
-
-
-
-    def sample_velocity_exact(self, z : Tensor) -> Tensor:
-        """
-        Samples the initial momentum for the FHMC algorithm, exactly according to distribution induced by kinetic energy.
-
-        Args:
-            z (Tensor) : positions of shape (batch_size, d)
-
-        Returns:
-            Tensor: Sampled momentum tensor of shape (batch_size, d).
-            float (optional): If return_stats is True, average number of iterations per sample is also returned.
-        """
-        batch_size, d = z.shape
-
-        # Pre-computations
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
-        zero_mask = beta < 1e-10
-
-        safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
-        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
-        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-
-        # Initialize containers for the accepted directions u'
-        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
-        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-
-        # Acceptance-Rejection for the direction u'
-        while not accepted_mask.all():
-            active_indices = torch.where(~accepted_mask)[0]
-            num_to_sample = len(active_indices)
-
-            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-
-            # Moebius transform on the subset
-            u_subset = self.moebius_transform(
-                v_subset,
-                mu[active_indices],
-                rho[active_indices],
-                M[active_indices]
-            )
-
-           # Bernoulli accept-reject
-            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
-            alpha = torch.rand(num_to_sample, device=z.device) <= p
-
-            if alpha.any():
-                just_accepted_indices = active_indices[alpha]
-                final_u_prime[just_accepted_indices] = u_subset[alpha]
-                accepted_mask[just_accepted_indices] = True
-
-        # Sample radius r
-        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
-        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
-        
-        # Final momentum q = r * u'
-        final_v = r.unsqueeze(-1) * final_u_prime
-        
-        return final_v
-
-    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Legendre transform for the Randers metric at positions z.
-
-        Args:
-            v:   (batch, d) velocity vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
-        """
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            quad = (v * G * v).sum(-1)
-            Gv = G * v
-        else:
-            quad = torch.einsum("bi,bij,bj->b", v, G, v)
-            Gv = torch.einsum("bij,bj->bi", G, v)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", v, w)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
-
-    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Reversed Legendre transform for the dual Randers metric at positions z.
-
-        Args:
-            p:   (batch, d) momentum vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
-        """
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-
-        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        Gv = torch.einsum("bij,bj->bi", G_star, p)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", p, w_star)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w_star)
-
-    def sample_momentum(self, z: Tensor, momentum_sampler : str | None = None) -> Tensor:
-        """
-        Sample the momentum at position z according to the configured momentum sampler.
-
-        Parameters
-        ----------
-        z : Tensor
-            The position(s) at which to sample the momentum. Shape (batch_size, d).
-
-        Raises
-        ------
-        ValueError
-            If the provided momentum_sampler string is not one of ['exact', 'mcmc'].
-
-        Returns
-        -------
-        Tensor
-            The sampled momentum at each position in z. Shape (batch_size, d).
-        """
-        if momentum_sampler is None : 
-            momentum_sampler = self.momentum_sampler
-        if momentum_sampler == "exact" : 
-            v = self.sample_velocity_exact(z)
-            p = self.legendre(v,z)
-            return p
-        elif self.momentum_sampler == "mcmc" : 
-            v = self.sample_velocity_mcmc(z)
-            p = self.legendre(v,z)
-            return p
-        else : 
-            raise ValueError(f"Invalid momentum_sampler argument: {self.momentum_sampler}. Must be one of ['exact', 'mcmc'].")
-
-
-class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
-
-    def __init__(
-        self,
-        randers_cometric : DualRandersMetrics,
-        l : int,
-        N_fx,
-        gamma : float,
-        N_run : int,
-        bounds : float = 1e3,
-        std_0 : float = 1.0,
-        beta_0 : float = 1.0,
-        pbar : bool = False,
-        skip_acceptance = False,
-        reduced_flip : bool = True,
-    ):
-        super().__init__(
-            randers_cometric.primal_randers.base_cometric,
-            l,
-            N_fx,
-            gamma,
-            N_run,
-            std_0,
-            bounds,
-            beta_0,
-            pbar,
-            skip_acceptance
-        )
-        self.randers_cometric = randers_cometric
-        self.reduced_flip = reduced_flip
-
-
-    def U(self, z: Tensor) -> Tensor:
-        """
-        Dual Busemann-Hausdorff potential energy
-
-        Args:
-            z: Tensor of shape (n_batch, d)
-
-        Returns:
-            Tensor of shape (n_batch,)
-        """
-        d = z.shape[1]
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            + 0.5 * (d + 1) * torch.log1p(-alpha)
-            + 0.5 * logdet_G_star
-        )
-
-    def K(self, p: Tensor, z: Tensor) -> Tensor:
-        """Compute Kinetic energy in the randers case 
-        K(p) = (
-        1/2 * F_z^*(p)^2
-        - (d+1)/2 * log(1-g^*_inv(omega^*))
-        -1/2 * logdet G^* + d/2 * log 2pi
-        )
-
-        Args:
-            p (Tensor): Momentum vector of shape (n_batch, d)
-            z (Tensor): Position vector of shape (n_batch, d)
-
-        Returns:
-            Tensor: Kinetic energy of shape (n_batch,)
-        """
-        d = z.shape[1]
-        metric_term = 0.5 * self.randers_cometric(z, p) ** 2
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-        L = torch.linalg.cholesky(G_star)
-        y = torch.linalg.solve_triangular(L, w_star.unsqueeze(-1), upper=False).squeeze(-1)
-        alpha = torch.einsum("bi,bi->b", y, y)
-        logdet_G_star = 2.0 * torch.diagonal(L, dim1=-2, dim2=-1).log().sum(-1)
-
-        return (
-            metric_term
-            - 0.5 * (d + 1) * torch.log1p(-alpha)
-            - 0.5 * logdet_G_star
-            + 0.5 * d * self.log2pi
-        )
-
-    def H(self, z: Tensor, p: Tensor) -> Tensor:
-        return 0.5 * self.randers_cometric(z, p) ** 2
-
-    def H_tilde(self, z : Tensor, p : Tensor) -> Tensor : 
-        d = z.shape[1]
-        F_star = self.randers_cometric(z, p)
-        w_star = self.randers_cometric.omega_star(z)
-        G_star = self.randers_cometric.G_star(z)
-        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        riem_norm = torch.sqrt(p_Gstar_p)
-        wstar_p = torch.einsum("bi,bi->b", w_star, p)
-        log_randers_factor = torch.log1p(wstar_p / riem_norm)
-        return 0.5 * F_star**2-(d + 1) * log_randers_factor
-
-
-    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
-        """
-        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
-
-        Args:
-            u (Tensor): Input points of shape (batch_size, d).
-            mu (Tensor): Mean direction vector of shape (batch_size, d).
-            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
-            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
-
-        Returns:
-            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
-        """
-        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
-
-        rho_ = rho.unsqueeze(-1)  # (B, 1)
-
-        num = (1 - rho_**2) * (u + rho_ * mu)
-        den = 1 + 2 * rho_ * inner_prod + rho_**2
-
-        return num / den + rho_ * mu
-
-
-    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
-        """
-        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
-
-        Args:
-            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
-
-        Returns:
-            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
-            L-induced unit sphere.
-        """
-        batch_size, d, _ = L.shape
-
-        # Sample standard Gaussian
-        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
-
-        # Normalize to Euclidean unit sphere
-        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
-
-        # Solve L^T v = z_unit  (batched)
-        v = torch.linalg.solve_triangular(
-            L.transpose(-1, -2),              
-            z_unit.unsqueeze(-1),             
-            upper=True
-        ).squeeze(-1)                     
-
-        return v
-
-
-
-    def sample_velocity_exact(self, z : Tensor) -> Tensor:
-        """
-        Samples the initial momentum for the FHMC algorithm, exactly according to distribution induced by kinetic energy.
-
-        Args:
-            z (Tensor) : positions of shape (batch_size, d)
-
-        Returns:
-            Tensor: Sampled momentum tensor of shape (batch_size, d).
-            float (optional): If return_stats is True, average number of iterations per sample is also returned.
-        """
-        batch_size, d = z.shape
-
-        # Pre-computations
-        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            M = torch.diag_embed(M)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        L = torch.linalg.cholesky(M)
-        M_inv = torch.linalg.inv(M)
-        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
-        zero_mask = beta < 1e-10
-
-        safe_beta = beta.clamp(min=1e-10)
-        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
-        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
-        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
-
-        # Initialize containers for the accepted directions u'
-        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
-        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
-
-        # Acceptance-Rejection for the direction u'
-        while not accepted_mask.all():
-            active_indices = torch.where(~accepted_mask)[0]
-            num_to_sample = len(active_indices)
-
-            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
-
-            # Moebius transform on the subset
-            u_subset = self.moebius_transform(
-                v_subset,
-                mu[active_indices],
-                rho[active_indices],
-                M[active_indices]
-            )
-
-           # Bernoulli accept-reject
-            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
-            alpha = torch.rand(num_to_sample, device=z.device) <= p
-
-            if alpha.any():
-                just_accepted_indices = active_indices[alpha]
-                final_u_prime[just_accepted_indices] = u_subset[alpha]
-                accepted_mask[just_accepted_indices] = True
-
-        # Sample radius r
-        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
-        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
-        
-        # Final momentum q = r * u'
-        final_v = r.unsqueeze(-1) * final_u_prime
-        
-        return final_v
-
-    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Legendre transform for the Randers metric at positions z.
-
-        Args:
-            v:   (batch, d) velocity vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
-        """
-        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
-        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
-
-        if self.randers_cometric.primal_randers.base_cometric.is_diag:
-            quad = (v * G * v).sum(-1)
-            Gv = G * v
-        else:
-            quad = torch.einsum("bi,bij,bj->b", v, G, v)
-            Gv = torch.einsum("bij,bj->bi", G, v)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", v, w)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
-
-    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        """
-        Reversed Legendre transform for the dual Randers metric at positions z.
-
-        Args:
-            p:   (batch, d) momentum vectors
-            z:   (batch, d) positions
-            eps: small number to avoid division by zero
-
-        Returns:
-            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
-        """
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
-
-        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        Gv = torch.einsum("bij,bj->bi", G_star, p)
-        norm_term = torch.sqrt(quad.clamp_min(eps))
-        dot_term = torch.einsum("bi,bi->b", p, w_star)
-
-        F = norm_term + dot_term
-
-        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w_star)
-
-    def sample_momentum(self, z: Tensor, momentum_sampler : str | None = None) -> Tensor:
-        """
-        Sample the momentum at position z according to the configured momentum sampler.
-
-        Parameters
-        ----------
-        z : Tensor
-            The position(s) at which to sample the momentum. Shape (batch_size, d).
-
-        Raises
-        ------
-        ValueError
-            If the provided momentum_sampler string is not one of ['exact', 'mcmc'].
-
-        Returns
-        -------
-        Tensor
-            The sampled momentum at each position in z. Shape (batch_size, d).
-        """
-        v = self.sample_velocity_exact(z)
-        p = self.legendre(v,z)
-        return p
-
-    def proposal_rate(self, z: Tensor, v: Tensor, z_new: Tensor, v_new: Tensor) -> Tensor:
-        """
-        Compute the proposal rates based on the value of the Preserved Hamiltonian.
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The initial position.
-        v : Tensor (b,d)
-            The initial velocity.
-        z_new : Tensor (b,d)
-            The new position.
-        v_new : Tensor (b,d)
-            The new velocity.
-
-        Returns
-        -------
-        Tensor (b,)
-            The proposal rates.
-        """
-        alpha = torch.exp(-self.H_tilde(z_new, v_new) + self.H_tilde(z, v))
-        return torch.min(torch.ones_like(alpha), alpha)
-
-    def get_v_half(self, z: Tensor, v: Tensor, dirs: Tensor) -> Tensor:
-        """
-        Solves the fixed point equation for the velocity.
-        v_half = v - dirs * gamma/2 * dH_dz(z, v_half)
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-        v : Tensor (b,d)
-            The velocity.
-        dirs : Tensor (b,)
-            Per-batch direction: +1 for forward, -1 for backward.
-
-        Returns
-        -------
-        v_half : Tensor (b,d)
-            The half step velocity.
-        """
-        d = dirs[:, None]
-        v_half = v.clone()
-        for k in range(self.N_fx):
-            v_half_ = v - d * self.gamma * self.dH_dz(z, v_half) / 2
-            if (v_half_ - v_half).abs().max() < self.threshold_fx:
-                v_half = v_half_
+        super().__init__()
+        self.dH_dz = dH_dz
+        self.dH_dp = dH_dp
+        self.gamma = gamma
+        self.l = l
+        self.N_fx = N_fx
+        self.threshold_fx = threshold_fx
+
+    def _get_p_half(self, z: Tensor, p: Tensor, g: Tensor) -> Tensor:
+        """Fixed point p_half = p - g/2 * dH_dz(z, p_half). g is the signed
+        step (b, 1)."""
+        p_half = p.clone()
+        for _ in range(self.N_fx):
+            p_half_ = p - g * self.dH_dz(z, p_half) / 2
+            if (p_half_ - p_half).abs().max() < self.threshold_fx:
+                p_half = p_half_
                 break
-            v_half = v_half_
-        return v_half
+            p_half = p_half_
+        return p_half
 
-    def get_z_new(self, z: Tensor, v_half: Tensor, dirs: Tensor) -> Tensor:
-        """
-        Solves the fixed point equation for the position.
-        z_new = z + dirs * gamma/2 * ( dH_dv(z, v_half) + dH_dv(z_new,v_half) )
-
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The position.
-        v_half : Tensor (b,d)
-            The half step velocity.
-        dirs : Tensor (b,)
-            Per-batch direction: +1 for forward, -1 for backward.
-
-        Returns
-        -------
-        z_new : Tensor (b,d)
-            The new position.
-        """
-        d = dirs[:, None]
+    def _get_z_new(self, z: Tensor, p_half: Tensor, g: Tensor) -> Tensor:
+        """Fixed point z_new = z + g/2 * (dH_dp(z, p_half) + dH_dp(z_new, p_half))."""
         z_new = z.clone()
-        dH_dv = self.dH_dv(z, v_half)
-        for k in range(self.N_fx):
-            z_new_ = (
-                z + d * self.gamma * (dH_dv+ self.dH_dv(z_new, v_half)) / 2
-            )
+        dH_dp_0 = self.dH_dp(z, p_half)
+        for _ in range(self.N_fx):
+            z_new_ = z + g * (dH_dp_0 + self.dH_dp(z_new, p_half)) / 2
             if (z_new_ - z_new).abs().max() < self.threshold_fx:
                 z_new = z_new_
                 break
             z_new = z_new_
         return z_new
 
-    def leapfrog_step(self, z: Tensor, v: Tensor, dirs: Tensor) -> tuple[Tensor, Tensor]:
-        """
-        Perform a single leapfrog step.
+    def _step(self, z: Tensor, p: Tensor, g: Tensor) -> tuple[Tensor, Tensor]:
+        p_half = self._get_p_half(z, p, g)
+        z_new = self._get_z_new(z, p_half, g)
+        p_new = p_half - g * self.dH_dz(z_new, p_half) / 2
+        return z_new, p_new
 
-        Parameters
-        ----------
-        z : Tensor (b,d)
-            The initial position.
-        v : Tensor (b,d)
-            The initial velocity.
-        dirs : Tensor (b,)
-            Per-batch direction: +1 for forward, -1 for backward.
-
-        Returns
-        -------
-        z_new : Tensor (b,d)
-            The new position.
-        v_new : Tensor (b,d)
-            The new velocity.
-        """
-        v_half = self.get_v_half(z, v, dirs)
-        z_new = self.get_z_new(z, v_half, dirs)
-        v_new = v_half - dirs[:, None] * self.gamma * self.dH_dz(z_new, v_half) / 2
-        return z_new, v_new
-
-    def leapfrog(
-        self, z: Tensor, v: Tensor, dirs: Tensor, return_traj: bool = False
+    def forward(
+        self, x0: Tensor, return_traj: bool = False, dirs: Tensor | None = None
     ) -> tuple[Tensor, Tensor]:
         """
-        Perform l leapfrog steps with per-batch direction.
+        Integrate l leapfrog steps starting from x0 = (z, p).
 
         Parameters
         ----------
-        z : Tensor (b,d)
-            The initial position.
-        v : Tensor (b,d)
-            The initial velocity.
-        dirs : Tensor (b,)
-            Per-batch direction: +1 for forward, -1 for backward.
+        x0 : Tensor (b, 2d)
+            Initial concatenated state.
         return_traj : bool
-            If True, returns the full trajectory over the l leapfrog steps.
+            If True, return the full trajectory (b, l+1, 2d) instead of the
+            final state.
+        dirs : Tensor (b,) | None
+            Per-batch integration direction (+1 forward, -1 backward). If None,
+            all samples are integrated forward.
 
         Returns
         -------
-        z_new : Tensor (b,d)
-            The new position.
-        v_new : Tensor (b,d)
-            The new velocity.
-        or
-        (Tensor (b,l+1,d), Tensor (b,l+1,d))
-            The trajectory of positions and velocities (initial state included).
+        (Tensor, Tensor)
+            The final state (or trajectory) and the log-Jacobian of the discrete
+            map, shape (b,) (identically zero: leapfrog is symplectic).
         """
-        z_new, v_new = z.clone(), v.clone()
+        d = x0.shape[-1] // 2
+        z, p = x0[:, :d], x0[:, d:]
+        if dirs is None:
+            g = torch.full(
+                (x0.shape[0], 1), self.gamma, device=x0.device, dtype=x0.dtype
+            )
+        else:
+            g = self.gamma * dirs.reshape(-1, 1).to(device=x0.device, dtype=x0.dtype)
+
         if return_traj:
-            traj_q = [z_new.clone()]
-            traj_p = [v_new.clone()]
-        beta_k_minus_1_sqrt = self.beta_0_sqrt
-        for k in range(self.l):
-            z_new, v_new = self.leapfrog_step(z_new, v_new, dirs)
-            beta_k_sqrt = self.tempering(k)
-            v_new = (beta_k_minus_1_sqrt / beta_k_sqrt) * v_new
-            beta_k_minus_1_sqrt = beta_k_sqrt
+            traj = [x0.clone()]
+        for _ in range(self.l):
+            z, p = self._step(z, p, g)
             if return_traj:
-                traj_q.append(z_new.clone())
-                traj_p.append(v_new.clone())
+                traj.append(torch.cat([z, p], dim=-1).clone())
+
+        log_det = torch.zeros(x0.shape[0], device=x0.device, dtype=x0.dtype)
         if return_traj:
-            return torch.stack(traj_q, dim=1), torch.stack(traj_p, dim=1)
-        return z_new, v_new
+            return torch.stack(traj, dim=1), log_det
+        return torch.cat([z, p], dim=-1), log_det
+
+
+class FHMC_initial(torch.nn.Module):
+    """
+    Finslerian HMC with the initial (canonical) dynamics.
+
+    The Randers-biased momentum is drawn exactly (same ``MomentumSampler`` as
+    ``FHMC``) and the trajectory follows the canonical dynamics of the geodesic
+    Hamiltonian H = U + K (no ``tau``), integrated with a symmetric implicit
+    leapfrog. The leapfrog is symplectic, so acceptance reduces to the energy
+    difference of the exact ``H_tilde = U + K + tau`` (identical to
+    ``FHMC.H_tilde``): both samplers target the same distribution and differ only
+    in the integrator. Requires d >= 2.
+
+    Parameters
+    ----------
+    target : Callable[[Tensor], Tensor]
+        Unnormalized target density, maps (b, d) positions to (b,) densities.
+        Must be differentiable with torch.
+    randers_cometric : DualRandersMetrics
+        The dual Randers metric.
+    l : int
+        Number of leapfrog steps per proposal.
+    N_fx : int
+        Number of Picard iterations per implicit leapfrog solve.
+    gamma : float
+        Integrator step size.
+    N_run : int
+        Number of MCMC iterations.
+    pbar : bool
+        If True, shows a progress bar when sampling.
+    skip_acceptance : bool
+        If True, proposals are always accepted (no Metropolis correction).
+    reduced_flip : bool
+        If True, uses the reduced momentum flip (Sohl-Dickstein 2012) on the
+        integration direction upon rejection.
+    """
+
+    def __init__(
+        self,
+        target: Callable[[Tensor], Tensor],
+        randers_cometric: DualRandersMetrics,
+        l: int,
+        N_fx,
+        gamma: float,
+        N_run: int,
+        pbar: bool = False,
+        skip_acceptance=False,
+        reduced_flip: bool = True,
+    ):
+        super().__init__()
+        self.target = target
+        self.randers_cometric = randers_cometric
+        self.l = l
+        self.N_fx = N_fx
+        self.gamma = gamma
+        self.N_run = N_run
+        self.pbar = pbar
+        self.skip_acceptance = skip_acceptance
+        self.reduced_flip = reduced_flip
+        self.log2pi = math.log(2.0 * math.pi)
+
+        # Per-sample gradients of the integrated Hamiltonian H = U + K (no tau),
+        # to avoid materializing a full (b, b, d) Jacobian. Same idiom as
+        # ImplicitRHMCSampler.
+        no_batch_H = lambda z, p: self.H(z.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
+        self._dH_dz = torch.vmap(torch.func.jacrev(no_batch_H, argnums=0))
+        self._dH_dp = torch.vmap(torch.func.jacrev(no_batch_H, argnums=1))
+        self.dH_dz = lambda z, p: self._dH_dz(z, p).squeeze(1)
+        self.dH_dp = lambda z, p: self._dH_dp(z, p).squeeze(1)
+
+        self.momentum_sampler = MomentumSampler(randers_cometric)
+        self.integrator = RandersLeapfrogIntegrator(
+            self.dH_dz, self.dH_dp, gamma, l, N_fx
+        )
+
+    # ------------------------------------------------------------------
+    # Energies (identical to FHMC: same target distribution)
+    # ------------------------------------------------------------------
+
+    def U(self, z: Tensor) -> Tensor:
+        """Potential energy U(z) = -log target(z). Shape (b,)."""
+        return -torch.log(self.target(z))
+
+    def log_sigma_BH(self, z: Tensor) -> Tensor:
+        """
+        Log Busemann-Hausdorff density of the Randers metric expressed with
+        dual quantities: log sigma_BH(z) = -1/2 log det G*(z). Shape (b,).
+        """
+        G_star = self.randers_cometric.G_star(z)
+        _, logabsdet = torch.linalg.slogdet(G_star)
+        return -0.5 * logabsdet
+
+    def K(self, z: Tensor, p: Tensor) -> Tensor:
+        """
+        Kinetic energy of the geodesic Hamiltonian with the Busemann-Hausdorff
+        term: K(z, p) = 1/2 F*_z(p)^2 + log sigma_BH(z) + d/2 log 2pi.
+        """
+        d = z.shape[1]
+        return (
+            0.5 * self.randers_cometric(z, p) ** 2
+            + self.log_sigma_BH(z)
+            + 0.5 * d * self.log2pi
+        )
+
+    def H(self, z: Tensor, p: Tensor) -> Tensor:
+        """
+        Integrated (canonical) Hamiltonian driving the leapfrog:
+        H(z, p) = U(z) + K(z, p) = U + log sigma_BH + 1/2 F*^2 + const. No tau.
+        """
+        return self.U(z) + self.K(z, p)
+
+    def tau(self, z: Tensor, p: Tensor) -> Tensor:
+        """
+        Correction between the simulated and preserved Hamiltonians:
+        tau(z, p) = -(d+1) log(F*_z(p) / ||p||_{G*}). Shape (b,).
+        """
+        d = z.shape[1]
+        G_star = self.randers_cometric.G_star(z)
+        w_star = self.randers_cometric.omega_star(z)
+        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        riem_norm = torch.sqrt(p_Gstar_p.clamp_min(1e-12))
+        wstar_p = torch.einsum("bi,bi->b", w_star, p)
+        return -(d + 1) * torch.log1p(wstar_p / riem_norm)
+
+    def K_tilde(self, z: Tensor, p: Tensor) -> Tensor:
+        return self.K(z, p) + self.tau(z, p)
+
+    def H_tilde(self, z: Tensor, p: Tensor) -> Tensor:
+        return self.U(z) + self.K_tilde(z, p)
+
+    # ------------------------------------------------------------------
+    # MCMC
+    # ------------------------------------------------------------------
+
+    def sample_momentum(self, z: Tensor) -> Tensor:
+        return self.momentum_sampler(z)
+
+    def proposal_rate(self, x_0: Tensor, x_l: Tensor, log_det: Tensor) -> Tensor:
+        """
+        Metropolis-Hastings acceptance probability of the proposal x_l obtained
+        from x_0 by the leapfrog map with log-Jacobian log_det (= 0 here):
+
+            alpha = min(1, exp(H_tilde(x_0) - H_tilde(x_l) + log_det)).
+
+        Shapes: x_0, x_l (b, 2d); log_det (b,); output (b,).
+        """
+        d = x_0.shape[-1] // 2
+        log_alpha = (
+            self.H_tilde(x_0[:, :d], x_0[:, d:])
+            - self.H_tilde(x_l[:, :d], x_l[:, d:])
+            + log_det
+        )
+        alpha = torch.exp(torch.clamp(log_alpha, max=0.0))
+        return torch.nan_to_num(alpha, nan=0.0)
+
+    @torch.no_grad()
+    def sample(
+        self, z_0: Tensor, return_traj=False, progress=False, return_acceptance=False, return_flip=False
+    ) -> Tensor | tuple[Tensor, float]:
+        """
+        Given an initial sample z_0, it returns a new sample from the target
+        distribution.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial sample.
+        return_traj : bool
+            If True, it returns the trajectory of the samples aswell as the
+            acceptance rate.
+        progress : bool
+            If True, it shows a progress bar when sampling.
+        return_acceptance : bool
+            If True, it returns the sample aswell as the acceptance rate.
+        return_flip : bool
+            If True, it returns the proportion of direction flips over all steps.
+
+        Returns
+        -------
+        Tensor (b,d)
+            The new samples.
+        or
+        (Tensor (b,N_run,d) , float)
+            The trajectory of the samples (the initial sample is the first
+            element) and the acceptance rate.
+        or
+        (Tensor (b,d), float)
+            The new samples and the acceptance rate.
+        """
+        accepted_samples = 0
+        flipped_samples = 0
+        z = z_0.clone()
+        d = z.shape[1]
+        dirs = torch.ones(z.shape[0], device=z_0.device, dtype=z_0.dtype)
+
+        if return_traj:
+            traj = [z.clone()]
+
+        if progress or self.pbar:
+            pbar = tqdm(range(self.N_run), desc="Sampling", unit="steps")
+        else:
+            pbar = range(self.N_run)
+
+        for k in pbar:
+            p_0 = self.sample_momentum(z)
+            x_0 = torch.cat([z, p_0], dim=-1)
+            try:
+                x_l, log_det = self.integrator(x_0, dirs=dirs)
+                alpha = self.proposal_rate(x_0, x_l, log_det)
+            except _LinAlgError:
+                # @TODO: Handle this error properly.
+                # Not the best way to handle this error.
+                # Because a single LinAlgError for a given sample
+                # will stop the whole process even for other valid samples.
+                alpha = torch.zeros(z.shape[0], device=z.device)
+                x_l = x_0.clone()
+            z_l = x_l[:, :d]
+
+            if not self.skip_acceptance:
+                u = torch.rand_like(alpha)
+                accept_mask = u < alpha
+                if self.reduced_flip:
+                    rej_idx = (~accept_mask).nonzero(as_tuple=False).squeeze(-1)
+                    if rej_idx.numel() > 0:
+                        # Reduced momentum flip (Sohl-Dickstein 2012, Eq. 11)
+                        # applied to the integration direction:
+                        # P_flip = max(0, alpha(LFζ) - alpha(Lζ))
+                        # Only computed for rejected samples.
+                        try:
+                            x_l_flip, log_det_flip = self.integrator(
+                                x_0[rej_idx], dirs=-dirs[rej_idx]
+                            )
+                            alpha_flip_rej = self.proposal_rate(
+                                x_0[rej_idx], x_l_flip, log_det_flip
+                            )
+                        except _LinAlgError:
+                            alpha_flip_rej = torch.zeros(rej_idx.numel(), device=z.device)
+                        alpha_flip = torch.zeros_like(alpha)
+                        alpha_flip[rej_idx] = alpha_flip_rej
+                        p_flip = (alpha_flip - alpha).clamp(min=0)
+                        flip_mask = ~accept_mask & (u < alpha + p_flip)
+                    else:
+                        flip_mask = ~accept_mask  # all False, no rejections
+                else:
+                    flip_mask = ~accept_mask
+                z = torch.where(accept_mask[:, None], z_l, z)
+                dirs = torch.where(flip_mask, -dirs, dirs)
+                accepted_samples += accept_mask.sum().item()
+                flipped_samples += flip_mask.sum().item()
+            else:
+                # Even without the Metropolis correction, never adopt an invalid
+                # state (integration blow-up, or a finite state outside the
+                # region where the Randers metric is defined): the momentum
+                # sampler could not be evaluated there. Such states are exactly
+                # those with alpha = 0 (NaN energies -> alpha = 0 in proposal_rate).
+                valid_mask = torch.isfinite(z_l).all(dim=-1) & (alpha > 0)
+                z = torch.where(valid_mask[:, None], z_l, z)
+                accepted_samples += z.shape[0]
+
+            if return_traj:
+                traj.append(z.clone())
+
+            if progress or self.pbar:
+                pbar.set_postfix(
+                    {"acceptance_rate": accepted_samples / ((k + 1) * z_0.shape[0])}
+                )
+
+        acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
+        flip_rate = flipped_samples / (self.N_run * z_0.shape[0])
+
+        if return_traj:
+            traj = torch.stack(traj, dim=1)
+            if return_acceptance:
+                return (traj, acceptance_rate, flip_rate) if return_flip else (traj, acceptance_rate)
+            return (traj, flip_rate) if return_flip else traj
+        if return_acceptance:
+            return (z, acceptance_rate, flip_rate) if return_flip else (z, acceptance_rate)
+        return (z, flip_rate) if return_flip else z
+
+
+class ImplicitMidpointIntegrator(torch.nn.Module) :
+    """
+    Implicit midpoint integrator x1 = x0 + gamma * f((x0 + x1) / 2) for an
+    arbitrary vector field f. The step is symmetric (Phi_{-gamma} = Phi_gamma^{-1})
+    and the exact log-Jacobian of each discrete step,
+
+        Delta log J = log|det(I + gamma/2 D)| - log|det(I - gamma/2 D)|,
+        D = df((x0 + x1) / 2),
+
+    is accumulated so it can be included in a Metropolis ratio.
+
+    Parameters
+    ----------
+    f : Callable
+        Vector field, maps (b, n) to (b, n).
+    df : Callable
+        Jacobian of the field, maps (b, n) to (b, n, n).
+    gamma : float
+        Step size.
+    l : int
+        Number of integration steps.
+    N_fx : int
+        Number of fixed-point (picard) or Newton iterations per step.
+    method : str
+        "picard" or "newton".
+    """
+
+    def __init__(
+        self,
+        f : Callable[[Tensor], Tensor],
+        df : Callable[[Tensor], Tensor],
+        gamma : float,
+        l : int,
+        N_fx : int,
+        method : str= "picard"):
+        super().__init__()
+
+        self.f = f
+        self.df = df
+        self.gamma = gamma
+        self.l = l
+        self.N_fx = N_fx
+        self.method = method
+
+    def picard(self, x0 : Tensor, gamma : Tensor) :
+        x1 = x0.clone()
+        for _ in range(self.N_fx) :
+            x_mid = (x1 + x0) / 2
+            x1_ = x0 + gamma * self.f(x_mid)
+            delta = (x1_ - x1).abs().max()
+            x1 = x1_
+            # Early exit once the fixed point has converged (same pattern as
+            # the repo's other implicit integrators); the field evaluation
+            # dominates the step cost, so this roughly halves it when the
+            # contraction is fast. NaN deltas (diverging samples) never
+            # compare true, so divergent batches still run all N_fx iters.
+            if delta < 1e-12:
+                break
+        return x1
+
+
+    def newton(self, x0 : Tensor, gamma : Tensor) :
+        x1 = x0.clone()
+        I = torch.eye(x0.shape[-1], device=x0.device, dtype=x0.dtype)
+        for _ in range(self.N_fx) :
+            x_mid = (x1 + x0) / 2
+            D = self.df(x_mid)
+            residual = x1 - x0 - gamma * self.f(x_mid)
+            J = I - 0.5 * gamma.unsqueeze(-1) * D
+            x1 = x1 - torch.linalg.solve(J, residual)
+        return x1
+
+
+    def one_step(self, x0 : Tensor, gamma : Tensor):
+        if self.method == "picard" :
+            x1 = self.picard(x0, gamma)
+        elif self.method == "newton" :
+            x1 = self.newton(x0, gamma)
+        x_mid = (x1+x0)/2
+        D = self.df(x_mid)
+        I = torch.eye(D.shape[-1], device=D.device, dtype=D.dtype)
+        gamma_D = 0.5 * gamma.unsqueeze(-1) * D
+        _, logabsdet_plus = torch.linalg.slogdet(I + gamma_D)
+        _, logabsdet_minus = torch.linalg.slogdet(I - gamma_D)
+        delta = logabsdet_plus - logabsdet_minus
+        return x1, delta
+
+    def forward(self, x0 : Tensor, return_traj : bool = False, dirs : Tensor | None = None) :
+        """
+        Integrate l steps starting from x0.
+
+        Parameters
+        ----------
+        x0 : Tensor (b, n)
+            Initial state.
+        return_traj : bool
+            If True, return the full trajectory (b, l+1, n) instead of the
+            final state.
+        dirs : Tensor (b,) | None
+            Per-batch integration direction (+1 forward, -1 backward). If
+            None, all samples are integrated forward.
+
+        Returns
+        -------
+        (Tensor, Tensor)
+            The final state (or trajectory) and the accumulated log-Jacobian
+            of the discrete map, shape (b,).
+        """
+        if dirs is None:
+            gamma = torch.full(
+                (x0.shape[0], 1), self.gamma, device=x0.device, dtype=x0.dtype
+            )
+        else:
+            gamma = self.gamma * dirs.reshape(-1, 1).to(device=x0.device, dtype=x0.dtype)
+        log_det = 0
+        if return_traj:
+            traj = [x0.clone()]
+        for i in range(self.l):
+            x1, delta = self.one_step(x0, gamma)
+            x0 = x1
+            log_det += delta
+            if return_traj:
+                traj.append(x0.clone())
+        if return_traj:
+            traj = torch.stack(traj, dim=1)
+            return traj, log_det
+        return x0, log_det
+
+
+
+
+class MomentumSampler(torch.nn.Module):
+    """
+    Exact sampler for the Randers-biased momentum conditional
+
+        pi(p|z) ∝ exp(-1/2 F*_z(p)^2) (F*_z(p) / ||p||_{G*})^{d+1} sqrt(det G*(z)),
+
+    obtained by drawing the velocity v ~ exp(-1/2 F_z(v)^2) (Moebius
+    accept-reject scheme on the primal Randers metric) and pushing it through
+    the Legendre transform p = d_v (1/2 F_z(v)^2).
+
+    Parameters
+    ----------
+    randers_cometric : DualRandersMetrics
+        The dual Randers metric.
+    """
+
+    def __init__(self, randers_cometric: DualRandersMetrics):
+        super().__init__()
+        self.randers_cometric = randers_cometric
+
+    def moebius_transform(self, u: Tensor, mu: Tensor, rho: Tensor, M: Tensor) -> Tensor:
+        """
+        Applies a Möbius transformation relevant to sampling on Riemannian manifolds.
+
+        Args:
+            u (Tensor): Input points of shape (batch_size, d).
+            mu (Tensor): Mean direction vector of shape (batch_size, d).
+            rho (Tensor): Scalar parameter controlling rotation/stretch (batch_size,).
+            M (Tensor): Symmetric positive definite matrix (covariance or metric) of shape (batch_size, d, d).
+
+        Returns:
+            Tensor: Transformed points of shape (batch_size, d) after applying the Möbius transformation.
+        """
+        inner_prod = torch.einsum('bi,bij,bj->b', u, M, mu).unsqueeze(-1)  # (B, 1)
+
+        rho_ = rho.unsqueeze(-1)  # (B, 1)
+
+        num = (1 - rho_**2) * (u + rho_ * mu)
+        den = 1 + 2 * rho_ * inner_prod + rho_**2
+
+        return num / den + rho_ * mu
+
+    def riemann_sphere_uniform_sampler(self, L: Tensor) -> Tensor:
+        """
+        Uniformly samples points from the unit sphere with respect to the induced metric defined by L on R^d.
+
+        Args:
+            L (Tensor): Cholesky factor of a positive-definite matrix of shape (batch_size, d, d)
+
+        Returns:
+            Tensor: An array of shape (batch_size, d) containing batch_size points uniformly sampled on the
+            L-induced unit sphere.
+        """
+        batch_size, d, _ = L.shape
+
+        # Sample standard Gaussian
+        z = torch.randn(batch_size, d, device=L.device, dtype=L.dtype)
+
+        # Normalize to Euclidean unit sphere
+        z_unit = z / torch.linalg.norm(z, dim=-1, keepdim=True)
+
+        # Solve L^T v = z_unit  (batched)
+        v = torch.linalg.solve_triangular(
+            L.transpose(-1, -2),
+            z_unit.unsqueeze(-1),
+            upper=True
+        ).squeeze(-1)
+
+        return v
+
+    def sample_velocity_exact(self, z: Tensor) -> Tensor:
+        """
+        Samples the velocity v ~ exp(-1/2 F_z(v)^2), exactly.
+
+        Args:
+            z (Tensor) : positions of shape (batch_size, d)
+
+        Returns:
+            Tensor: Sampled velocity tensor of shape (batch_size, d).
+        """
+        batch_size, d = z.shape
+
+        # Pre-computations
+        M = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
+        if self.randers_cometric.primal_randers.base_cometric.is_diag:
+            M = torch.diag_embed(M)
+        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
+
+        L = torch.linalg.cholesky(M)
+        M_inv = torch.linalg.inv(M)
+        beta = torch.sqrt(torch.einsum('bi,bij,bj->b', w, M_inv, w))
+        zero_mask = beta < 1e-10
+
+        safe_beta = beta.clamp(min=1e-10)
+        M_inv_w = torch.einsum('bij,bj->bi', M_inv, w)
+        mu = torch.where(zero_mask.unsqueeze(-1), torch.zeros_like(M_inv_w), -M_inv_w / safe_beta.unsqueeze(-1))
+        rho = torch.where(zero_mask, torch.zeros_like(beta), beta / (1 + torch.sqrt((1 - beta**2).clamp(min=0))))
+
+        # Initialize containers for the accepted directions u'
+        final_u_prime = torch.zeros((batch_size, d), device=z.device, dtype=z.dtype)
+        accepted_mask = torch.zeros(batch_size, dtype=torch.bool, device=z.device)
+
+        # Acceptance-Rejection for the direction u'
+        while not accepted_mask.all():
+            active_indices = torch.where(~accepted_mask)[0]
+            num_to_sample = len(active_indices)
+
+            v_subset = self.riemann_sphere_uniform_sampler(L[active_indices])
+
+            # Moebius transform on the subset
+            u_subset = self.moebius_transform(
+                v_subset,
+                mu[active_indices],
+                rho[active_indices],
+                M[active_indices]
+            )
+
+            # Bernoulli accept-reject
+            p = (1 - beta[active_indices]) / (1 + torch.sum(u_subset * w[active_indices], dim=-1))
+            alpha = torch.rand(num_to_sample, device=z.device) <= p
+
+            if alpha.any():
+                just_accepted_indices = active_indices[alpha]
+                final_u_prime[just_accepted_indices] = u_subset[alpha]
+                accepted_mask[just_accepted_indices] = True
+
+        # Sample radius r
+        s = torch.randn(batch_size, d, device=z.device).norm(dim=-1)
+        r = s / (1 + torch.sum(final_u_prime * w, dim=-1))
+
+        # Final velocity v = r * u'
+        final_v = r.unsqueeze(-1) * final_u_prime
+
+        return final_v
+
+    def legendre(self, v: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        """
+        Legendre transform for the Randers metric at positions z.
+
+        Args:
+            v:   (batch, d) velocity vectors
+            z:   (batch, d) positions
+            eps: small number to avoid division by zero
+
+        Returns:
+            (batch, d) momentum vectors p = d_v (1/2 F(v)^2)
+        """
+        G = self.randers_cometric.primal_randers.base_cometric.metric_tensor(z)
+        w = self.randers_cometric.primal_randers.beta * self.randers_cometric.primal_randers.omega(z)
+
+        if self.randers_cometric.primal_randers.base_cometric.is_diag:
+            quad = (v * G * v).sum(-1)
+            Gv = G * v
+        else:
+            quad = torch.einsum("bi,bij,bj->b", v, G, v)
+            Gv = torch.einsum("bij,bj->bi", G, v)
+        norm_term = torch.sqrt(quad.clamp_min(eps))
+        dot_term = torch.einsum("bi,bi->b", v, w)
+
+        F = norm_term + dot_term
+
+        return F.unsqueeze(-1) * (Gv / norm_term.unsqueeze(-1) + w)
+
+    def reversed_legendre(self, p: torch.Tensor, z: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        """
+        Reversed Legendre transform for the dual Randers metric at positions z.
+
+        Args:
+            p:   (batch, d) momentum vectors
+            z:   (batch, d) positions
+            eps: small number to avoid division by zero
+
+        Returns:
+            (batch, d) velocity vectors v = d_p (1/2 F^*(p)^2)
+        """
+        G_star = self.randers_cometric.G_star(z)
+        w_star = self.randers_cometric.omega_star(z)
+
+        quad = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        Gp = torch.einsum("bij,bj->bi", G_star, p)
+        norm_term = torch.sqrt(quad.clamp_min(eps))
+        dot_term = torch.einsum("bi,bi->b", p, w_star)
+
+        F = norm_term + dot_term
+
+        return F.unsqueeze(-1) * (Gp / norm_term.unsqueeze(-1) + w_star)
+
+    def forward(self, z: Tensor) -> Tensor:
+        """
+        Sample the momentum p ~ pi(p|z) at positions z of shape (batch_size, d).
+        """
+        v = self.sample_velocity_exact(z)
+        return self.legendre(v, z)
+
+
+class _Gammaincc(torch.autograd.Function):
+    """
+    Regularised upper incomplete gamma Q(a, x) = Gamma(a, x)/Gamma(a) with
+    BOTH backward and forward-mode derivatives.
+
+    torch.special.gammaincc has no forward-AD rule (igammac), which blocks
+    torch.func.jacfwd through sigma() in FHMC. Its x-derivative is
+    elementary,
+
+        d/dx Q(a, x) = -x^{a-1} e^{-x} / Gamma(a),
+
+    so we provide it explicitly. The derivative expression is built from
+    differentiable primitives, so higher-order and mixed forward/reverse
+    derivatives compose correctly. a is a python float (never differentiated);
+    requires x > 0 (always true for x = t^2/2 with t > 0).
+    """
+
+    generate_vmap_rule = True
+
+    @staticmethod
+    def forward(x, a):
+        return torch.special.gammaincc(torch.full_like(x, a), x)
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        x, a = inputs
+        ctx.a = a
+        ctx.save_for_backward(x)
+        ctx.save_for_forward(x)
+
+    @staticmethod
+    def _dQ_dx(x, a):
+        return -torch.exp((a - 1.0) * torch.log(x) - x - math.lgamma(a))
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (x,) = ctx.saved_tensors
+        return grad_out * _Gammaincc._dQ_dx(x, ctx.a), None
+
+    @staticmethod
+    def jvp(ctx, x_tangent, a_tangent):
+        (x,) = ctx.saved_tensors
+        return x_tangent * _Gammaincc._dQ_dx(x, ctx.a)
+
+
+class FHMC(torch.nn.Module):
+    """
+    Finslerian HMC with the corrected (non-canonical) dynamics.
+
+    The Randers-biased momentum is drawn exactly and the trajectory follows the
+    deterministic Ma, Chen & Fox (2015) dynamics (D = 0) on the state x = (z, p),
+    dx/dt = -Q(x) grad H_tilde(x) + Gamma(x), with a skew-symmetric Q built from
+    a correction matrix C = I + sigma(F*) grad_p tau p^T / F*^2. The exact flow
+    preserves exp(-H_tilde) and its Jacobian cancels the energy difference, so
+    the exact-flow Metropolis ratio is one. It is integrated with the symmetric
+    implicit midpoint scheme and the exact log-Jacobian of the discrete map
+    enters the acceptance ratio. The field uses a regularised Hamiltonian (see
+    ``reg``) to smooth the p = 0 singularity while acceptance uses the exact
+    H_tilde, so the sampler is unbiased for any ``reg``. Requires d >= 2.
+
+    Parameters
+    ----------
+    target : Callable[[Tensor], Tensor]
+        Unnormalized target density, maps (b, d) positions to (b,) densities.
+        Must be differentiable with torch.
+    randers_cometric : DualRandersMetrics
+        The dual Randers metric.
+    l : int
+        Number of integrator steps per proposal.
+    N_fx : int
+        Number of fixed-point (picard) or Newton iterations per step.
+    gamma : float
+        Integrator step size.
+    N_run : int
+        Number of MCMC iterations.
+    pbar : bool
+        If True, shows a progress bar when sampling.
+    skip_acceptance : bool
+        If True, proposals are always accepted (no Metropolis correction).
+    reduced_flip : bool
+        If True, uses the reduced momentum flip (Sohl-Dickstein 2012) on the
+        integration direction upon rejection.
+    method : str
+        Fixed-point solver of the implicit midpoint step: "picard" or "newton".
+    reg : float
+        Relative regularisation of the Riemannian norm in the vector field:
+        ||p||_{G*} is replaced by sqrt(p^T G* p + reg^2 * d). Only affects
+        the dynamics, not the acceptance step.
+    """
+
+    def __init__(
+        self,
+        target : Callable[[Tensor], Tensor],
+        randers_cometric : DualRandersMetrics,
+        l: int,
+        N_fx,
+        gamma: float,
+        N_run: int,
+        pbar: bool = False,
+        skip_acceptance=False,
+        reduced_flip: bool = True,
+        method = "picard",
+        reg: float = 0.05,
+    ):
+        super().__init__()
+        self.randers_cometric = randers_cometric
+        self.target = target
+        self.l = l
+        self.N_fx = N_fx
+        self.gamma = gamma
+        self.N_run = N_run
+        self.pbar = pbar
+        self.skip_acceptance = skip_acceptance
+        self.reduced_flip = reduced_flip
+        self.reg = reg
+        self.log2pi = math.log(2.0 * math.pi)
+
+        # Forward-mode outer Jacobian: the field has as many outputs as inputs
+        # (2d), but forward-over-(inner reverse) is markedly cheaper here than
+        # reverse-over-reverse (measured ~5s -> ~1s per step at d = 11).
+        self.f = torch.vmap(self._f_single)
+        self.df = torch.vmap(torch.func.jacfwd(self._f_single))
+        self.momentum_sampler = MomentumSampler(randers_cometric)
+        self.integrator = ImplicitMidpointIntegrator(
+            self.f,
+            self.df,
+            gamma,
+            l,
+            N_fx,
+            method
+        )
+
+    # ------------------------------------------------------------------
+    # Energies (exact, used by the acceptance step)
+    # ------------------------------------------------------------------
+
+    def U(self, z : Tensor) :
+        """Potential energy U(z) = -log target(z). Shape (b,)."""
+        return -torch.log(self.target(z))
+
+    def log_sigma_BH(self, z: Tensor) -> Tensor:
+        """
+        Log Busemann-Hausdorff density of the Randers metric expressed with
+        dual quantities: log sigma_BH(z) = -1/2 log det G*(z). Shape (b,).
+
+        Uses slogdet rather than a Cholesky factor so that states where G*
+        is not positive-definite (Randers condition violated, e.g. a chain
+        that left the valid region) do not raise a batch-wide _LinAlgError:
+        such samples produce NaN downstream (through sqrt(p^T G* p) in the
+        kinetic terms) and are rejected individually by proposal_rate.
+        """
+        G_star = self.randers_cometric.G_star(z)
+        _, logabsdet = torch.linalg.slogdet(G_star)
+        return -0.5 * logabsdet
+
+    def K(self, z : Tensor, p : Tensor) :
+        """
+        Kinetic energy of the geodesic Hamiltonian with the Busemann-Hausdorff
+        term: K(z, p) = 1/2 F*_z(p)^2 + log sigma_BH(z) + d/2 log 2pi.
+        """
+        d = z.shape[1]
+        return (
+            0.5 * self.randers_cometric(z, p) ** 2
+            + self.log_sigma_BH(z)
+            + 0.5 * d * self.log2pi
+        )
+
+    def tau(self, z : Tensor, p : Tensor) :
+        """
+        Correction between the simulated and preserved Hamiltonians:
+        tau(z, p) = -(d+1) log(F*_z(p) / ||p||_{G*}). Shape (b,).
+        """
+        d = z.shape[1]
+        G_star = self.randers_cometric.G_star(z)
+        w_star = self.randers_cometric.omega_star(z)
+        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        riem_norm = torch.sqrt(p_Gstar_p.clamp_min(1e-12))
+        wstar_p = torch.einsum("bi,bi->b", w_star, p)
+        return -(d + 1) * torch.log1p(wstar_p / riem_norm)
+
+    def K_tilde(self, z : Tensor, p : Tensor) :
+        return self.K(z,p) + self.tau(z,p)
+
+    def H_tilde(self, z : Tensor, p : Tensor) :
+        return self.U(z) + self.K_tilde(z,p)
+
+    # ------------------------------------------------------------------
+    # Regularised quantities (used only to build the vector field)
+    # ------------------------------------------------------------------
+
+    def _randers_terms_reg(self, z: Tensor, p: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Regularised Riemannian norm n_delta = sqrt(p^T G* p + delta) with
+        delta = reg^2 * d, and the pairing <w*, p>. Shapes (b,), (b,).
+        """
+        d = z.shape[1]
+        delta = (self.reg ** 2) * d
+        G_star = self.randers_cometric.G_star(z)
+        w_star = self.randers_cometric.omega_star(z)
+        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
+        n_delta = torch.sqrt(p_Gstar_p + delta)
+        wstar_p = torch.einsum("bi,bi->b", w_star, p)
+        return n_delta, wstar_p
+
+    def F_star_reg(self, z: Tensor, p: Tensor) -> Tensor:
+        """Regularised dual norm F*_delta(z, p) = n_delta + <w*, p> > 0."""
+        n_delta, wstar_p = self._randers_terms_reg(z, p)
+        return n_delta + wstar_p
+
+    def tau_reg(self, z: Tensor, p: Tensor) -> Tensor:
+        """Regularised tau, smooth in p everywhere (including p = 0)."""
+        d = z.shape[1]
+        n_delta, wstar_p = self._randers_terms_reg(z, p)
+        return -(d + 1) * torch.log1p(wstar_p / n_delta)
+
+    def H_tilde_reg(self, z: Tensor, p: Tensor) -> Tensor:
+        """
+        Regularised corrected Hamiltonian driving the vector field:
+        U(z) + log sigma_BH(z) + 1/2 F*_delta^2 + tau_delta. Recovers
+        H_tilde (up to an additive constant) as reg -> 0.
+        """
+        d = z.shape[1]
+        n_delta, wstar_p = self._randers_terms_reg(z, p)
+        F_delta = n_delta + wstar_p
+        return (
+            self.U(z)
+            + self.log_sigma_BH(z)
+            + 0.5 * F_delta ** 2
+            - (d + 1) * torch.log1p(wstar_p / n_delta)
+        )
+
+    # ------------------------------------------------------------------
+    # Corrected dynamics: f(x) = -Q(x) grad H_tilde(x) + Gamma(x)
+    # ------------------------------------------------------------------
+
+    def sigma(self, t: Tensor, d: int) -> Tensor:
+        """
+        sigma(t) = -2^{(d-3)/2} e^{t^2/2} t^{3-d} Gamma((d-1)/2, t^2/2),
+
+        with Gamma(., .) the upper incomplete gamma function. Computed in log
+        space through the regularised torch.special.gammaincc; where the
+        latter underflows (t^2/2 >> (d-1)/2), the asymptotic expansion
+        sigma(t) = -(1 + (a-1)/x + (a-1)(a-2)/x^2 + O(x^-3)), a = (d-1)/2,
+        x = t^2/2, is used instead. sigma(t) -> -1 as t -> infinity.
+        """
+        a = 0.5 * (d - 1)
+        x = 0.5 * t ** 2
+        Q = _Gammaincc.apply(x, a)
+        tiny = torch.finfo(x.dtype).tiny
+        safe = Q > tiny
+        # Mask the inputs of the unsafe branch so that neither the forward
+        # nor the backward pass produces inf/nan in the untaken branch.
+        Q_safe = torch.where(safe, Q, torch.ones_like(Q))
+        x_safe = torch.where(safe, x, torch.ones_like(x))
+        log_abs = (
+            0.5 * (d - 3) * math.log(2.0)
+            + x_safe
+            - (d - 3) * torch.log(t)
+            + torch.log(Q_safe)
+            + math.lgamma(a)
+        )
+        exact = -torch.exp(log_abs)
+        asym = -(1.0 + (a - 1.0) / x + (a - 1.0) * (a - 2.0) / x ** 2)
+        return torch.where(safe, exact, asym)
+
+    def _H_reg_single(self, x: Tensor) -> Tensor:
+        """Regularised Hamiltonian on the concatenated state x = (z, p) of shape (2d,)."""
+        d = x.shape[-1] // 2
+        return self.H_tilde_reg(x[:d].unsqueeze(0), x[d:].unsqueeze(0)).squeeze(0)
+
+    def _C_single(self, x: Tensor) -> Tensor:
+        """
+        Correction matrix C(x) = I + sigma(F*) grad_p tau p^T / F*^2 built
+        from the regularised quantities. x of shape (2d,), output (d, d).
+        """
+        d = x.shape[-1] // 2
+        z, p = x[:d], x[d:]
+
+        def tau_p(p_: Tensor) -> Tensor:
+            return self.tau_reg(z.unsqueeze(0), p_.unsqueeze(0)).squeeze(0)
+
+        grad_tau = torch.func.grad(tau_p)(p)
+        F = self.F_star_reg(z.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
+        I = torch.eye(d, device=x.device, dtype=x.dtype)
+        return I + self.sigma(F, d) * torch.outer(grad_tau, p) / F ** 2
+
+    def _f_single_ref(self, x: Tensor) -> Tensor:
+        """
+        Reference implementation of the field (divergence terms by autodiff of
+        C). Correct but expensive: J_C has d^2 outputs, and differentiating it
+        again for df costs ~d^2 backward passes. Kept for validation only; the
+        production field is _f_single below.
+        """
+        d = x.shape[-1] // 2
+        grad_H = torch.func.grad(self._H_reg_single)(x)
+        g_z, g_p = grad_H[:d], grad_H[d:]
+        C = self._C_single(x)
+        J_C = torch.func.jacrev(self._C_single)(x)  # (d, d, 2d) : dC_ij / dx_k
+        div_p_C = torch.einsum("ijj->i", J_C[..., d:])
+        div_z_Ct = torch.einsum("jij->i", J_C[..., :d])
+        f_z = C @ g_p - div_p_C
+        f_p = -C.T @ g_z + div_z_Ct
+        return torch.cat([f_z, f_p])
+
+    def _f_single(self, x: Tensor) -> Tensor:
+        """
+        Vector field of the corrected dynamics on a single state x = (z, p):
+
+            f_z = C grad_p H_tilde - div_p C
+            f_p = -C^T grad_z H_tilde + div_z C^T
+
+        with C = I + a u p^T,  a := sigma(F)/F^2,  u := grad_p tau. The
+        divergence terms of Gamma are expanded ANALYTICALLY,
+
+            div_p C   = a (d u + (d_p u) p) + a'(F) (F - delta/n_delta) u
+            div_z C^T = p [ a div_z u + a'(F) (grad_z F . u) ]
+
+        with a'(F) = sigma'(F)/F^2 - 2 sigma(F)/F^3 and sigma' given by the
+        exact ODE identity sigma'(t) = sigma(t) (t + (3-d)/t) + t. This
+        removes the d^2-output Jacobian of C from the field: only a
+        Hessian-vector product (jvp of grad_p tau along p) and one mixed
+        d x d Jacobian trace remain, which makes df = jacfwd(f) both correct
+        (fwd-over-rev; fwd-over-fwd through the custom gammaincc jvp is NOT
+        trusted at second order) and ~10x cheaper. Validated against
+        _f_single_ref and finite differences. Output shape (2d,).
+        """
+        d = x.shape[-1] // 2
+        z, p = x[:d], x[d:]
+        delta = (self.reg ** 2) * d
+
+        grad_H = torch.func.grad(self._H_reg_single)(x)
+        g_z, g_p = grad_H[:d], grad_H[d:]
+
+        def tau_zp(z_: Tensor, p_: Tensor) -> Tensor:
+            return self.tau_reg(z_.unsqueeze(0), p_.unsqueeze(0)).squeeze(0)
+
+        def F_of_z(z_: Tensor) -> Tensor:
+            n_d, wp = self._randers_terms_reg(z_.unsqueeze(0), p.unsqueeze(0))
+            return (n_d + wp).squeeze(0)
+
+        # u = grad_p tau and the HVP (d_p u) p in a single jvp call
+        u_of_p = lambda p_: torch.func.grad(tau_zp, argnums=1)(z, p_)
+        u, Hu_p = torch.func.jvp(u_of_p, (p,), (p,))
+        # div_z u: trace of the mixed Jacobian d(grad_p tau)/dz. jacrev keeps
+        # the outer jacfwd(f) in the verified fwd-over-rev regime (no
+        # fwd-over-fwd through eigh).
+        u_of_z = lambda z_: torch.func.grad(tau_zp, argnums=1)(z_, p)
+        div_z_u = torch.einsum("ii->", torch.func.jacrev(u_of_z)(z))
+        gF_z = torch.func.grad(F_of_z)(z)
+
+        n_delta, wstar_p = [t.squeeze(0) for t in
+                            self._randers_terms_reg(z.unsqueeze(0), p.unsqueeze(0))]
+        F = n_delta + wstar_p
+        sig = self.sigma(F, d)
+        sig_prime = sig * (F + (3.0 - d) / F) + F        # exact ODE identity
+        a = sig / F ** 2
+        a_prime = sig_prime / F ** 2 - 2 * sig / F ** 3
+
+        C_gp = g_p + a * u * (p @ g_p)                   # C grad_p H
+        Ct_gz = g_z + a * p * (u @ g_z)                  # C^T grad_z H
+        div_p_C = a * (d * u + Hu_p) + a_prime * (F - delta / n_delta) * u
+        div_z_Ct = p * (a * div_z_u + a_prime * (gF_z @ u))
+
+        f_z = C_gp - div_p_C
+        f_p = -Ct_gz + div_z_Ct
+        return torch.cat([f_z, f_p])
+
+    # ------------------------------------------------------------------
+    # MCMC
+    # ------------------------------------------------------------------
+
+    def sample_momentum(self, z : Tensor) :
+        return self.momentum_sampler(z)
+
+    def proposal_rate(self, x_0: Tensor, x_l: Tensor, log_det: Tensor) -> Tensor:
+        """
+        Metropolis-Hastings acceptance probability of the proposal x_l
+        obtained from x_0 by the implicit midpoint map with log-Jacobian
+        log_det:
+
+            alpha = min(1, exp(H_tilde(x_0) - H_tilde(x_l) + log_det)).
+
+        Shapes: x_0, x_l (b, 2d); log_det (b,); output (b,).
+        """
+        d = x_0.shape[-1] // 2
+        log_alpha = (
+            self.H_tilde(x_0[:, :d], x_0[:, d:])
+            - self.H_tilde(x_l[:, :d], x_l[:, d:])
+            + log_det
+        )
+        alpha = torch.exp(torch.clamp(log_alpha, max=0.0))
+        return torch.nan_to_num(alpha, nan=0.0)
 
     @torch.no_grad()
     def sample(
@@ -5494,7 +3448,7 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
         return_acceptance : bool
             If True, it returns the sample aswell as the acceptance rate.
         return_flip : bool
-            If True, it returns the proportion of momentum flips over all steps.
+            If True, it returns the proportion of direction flips over all steps.
 
         Returns
         -------
@@ -5510,28 +3464,31 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
         accepted_samples = 0
         flipped_samples = 0
         z = z_0.clone()
-        dirs = torch.ones(z.shape[0], device=z_0.device)
+        d = z.shape[1]
+        dirs = torch.ones(z.shape[0], device=z_0.device, dtype=z_0.dtype)
 
         if return_traj:
             traj = [z.clone()]
 
-        if progress:
+        if progress or self.pbar:
             pbar = tqdm(range(self.N_run), desc="Sampling", unit="steps")
         else:
             pbar = range(self.N_run)
 
         for k in pbar:
-            v_0 = self.sample_momentum(z)
+            p_0 = self.sample_momentum(z)
+            x_0 = torch.cat([z, p_0], dim=-1)
             try:
-                z_l, v_l = self.leapfrog(z, v_0, dirs)
-                alpha = self.get_alpha(z, v_0, z_l, v_l)
+                x_l, log_det = self.integrator(x_0, dirs=dirs)
+                alpha = self.proposal_rate(x_0, x_l, log_det)
             except _LinAlgError:
                 # @TODO: Handle this error properly.
                 # Not the best way to handle this error.
                 # Because a single LinAlgError for a given sample
                 # will stop the whole process even for other valid samples.
                 alpha = torch.zeros(z.shape[0], device=z.device)
-                z_l = z.clone()
+                x_l = x_0.clone()
+            z_l = x_l[:, :d]
 
             if not self.skip_acceptance:
                 u = torch.rand_like(alpha)
@@ -5539,12 +3496,17 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
                 if self.reduced_flip:
                     rej_idx = (~accept_mask).nonzero(as_tuple=False).squeeze(-1)
                     if rej_idx.numel() > 0:
-                        # Reduced momentum flip (Sohl-Dickstein 2012, Eq. 11):
+                        # Reduced momentum flip (Sohl-Dickstein 2012, Eq. 11)
+                        # applied to the integration direction:
                         # P_flip = max(0, alpha(LFζ) - alpha(Lζ))
                         # Only computed for rejected samples.
                         try:
-                            z_l_flip, v_l_flip = self.leapfrog(z[rej_idx], v_0[rej_idx], -dirs[rej_idx])
-                            alpha_flip_rej = self.get_alpha(z[rej_idx], v_0[rej_idx], z_l_flip, v_l_flip)
+                            x_l_flip, log_det_flip = self.integrator(
+                                x_0[rej_idx], dirs=-dirs[rej_idx]
+                            )
+                            alpha_flip_rej = self.proposal_rate(
+                                x_0[rej_idx], x_l_flip, log_det_flip
+                            )
                         except _LinAlgError:
                             alpha_flip_rej = torch.zeros(rej_idx.numel(), device=z.device)
                         alpha_flip = torch.zeros_like(alpha)
@@ -5560,13 +3522,20 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
                 accepted_samples += accept_mask.sum().item()
                 flipped_samples += flip_mask.sum().item()
             else:
-                z = z_l
+                # Even without the Metropolis correction, never adopt an
+                # invalid state (integration blow-up, or a finite state
+                # outside the region where the Randers metric is defined):
+                # the momentum sampler could not be evaluated there. Such
+                # states are exactly those with alpha = 0 (NaN energies are
+                # mapped to alpha = 0 by proposal_rate).
+                valid_mask = torch.isfinite(z_l).all(dim=-1) & (alpha > 0)
+                z = torch.where(valid_mask[:, None], z_l, z)
                 accepted_samples += z.shape[0]
 
             if return_traj:
                 traj.append(z.clone())
 
-            if progress:
+            if progress or self.pbar:
                 pbar.set_postfix(
                     {"acceptance_rate": accepted_samples / ((k + 1) * z_0.shape[0])}
                 )
@@ -5582,144 +3551,3 @@ class ImplicitFHMCUnbiased(ImplicitRHMCSampler):
         if return_acceptance:
             return (z, acceptance_rate, flip_rate) if return_flip else (z, acceptance_rate)
         return (z, flip_rate) if return_flip else z
-
-
-class ImplicitFHMCUnbiased2(ImplicitFHMCUnbiased):
-    """
-    Same as ``ImplicitFHMCUnbiased`` but the implicit leapfrog integrator is
-    driven by ``H_tilde`` (the corrected Randers Hamiltonian, ``K_tilde``)
-    instead of ``H`` (the bare geodesic Hamiltonian ``K``).
-
-    In ``ImplicitFHMCUnbiased`` the integrator gradients ``dH_dz`` / ``dH_dv``
-    are built (in ``ImplicitRHMCSampler.__init__``) from ``self.H``, while the
-    acceptance step uses ``H_tilde``. Here we rebind those gradient closures so
-    the leapfrog steps follow the dynamics of ``H_tilde`` instead. The
-    acceptance step still uses ``H_tilde`` (inherited ``proposal_rate``).
-    """
-
-    def __init__(
-        self,
-        randers_cometric: DualRandersMetrics,
-        l: int,
-        N_fx,
-        gamma: float,
-        N_run: int,
-        bounds: float = 1e3,
-        std_0: float = 1.0,
-        beta_0: float = 1.0,
-        pbar: bool = False,
-        skip_acceptance=False,
-        reduced_flip: bool = True,
-    ):
-        super().__init__(
-            randers_cometric,
-            l,
-            N_fx,
-            gamma,
-            N_run,
-            bounds,
-            std_0,
-            beta_0,
-            pbar,
-            skip_acceptance,
-            reduced_flip,
-        )
-
-        # Rebuild the integrator gradients from H_tilde (K_tilde) instead of H.
-        no_batch_H_tilde = lambda x, y: self.H_tilde(
-            x.unsqueeze(0), y.unsqueeze(0)
-        ).squeeze(0)
-        self._dH_dz = torch.vmap(torch.func.jacrev(no_batch_H_tilde, argnums=0))
-        self._dH_dv = torch.vmap(torch.func.jacrev(no_batch_H_tilde, argnums=1))
-        self.dH_dz = lambda z, v: self._dH_dz(z, v).squeeze(1)
-        self.dH_dv = lambda z, v: self._dH_dv(z, v).squeeze(1)
-
-
-class ImplicitFHMCUnbiased2Reg(ImplicitFHMCUnbiased2):
-    """
-    Same as ``ImplicitFHMCUnbiased2`` (leapfrog driven by H_tilde), but the
-    integrator follows the regularised ``H_tilde_reg`` while the acceptance
-    step keeps the exact ``H_tilde``. Unbiasedness is preserved for any delta.
-    """
- 
-    def __init__(
-        self,
-        randers_cometric,          # DualRandersMetrics
-        l: int,
-        N_fx,
-        gamma: float,
-        N_run: int,
-        bounds: float = 1e3,
-        std_0: float = 1.0,
-        beta_0: float = 1.0,
-        pbar: bool = False,
-        skip_acceptance=False,
-        reduced_flip: bool = True,
-        delta_rel: float = 0.05,
-    ):
-        super().__init__(
-            randers_cometric,
-            l,
-            N_fx,
-            gamma,
-            N_run,
-            bounds,
-            std_0,
-            beta_0,
-            pbar,
-            skip_acceptance,
-            reduced_flip,
-        )
-        self.delta_rel = delta_rel
- 
-        # Rebind the integrator gradients to the REGULARISED Hamiltonian.
-        # (proposal_rate is inherited and still calls the exact self.H_tilde,
-        #  so the acceptance step is untouched.)
-        no_batch_H_reg = lambda x, y: self.H_tilde_reg(
-            x.unsqueeze(0), y.unsqueeze(0)
-        ).squeeze(0)
-        self._dH_dz = torch.vmap(torch.func.jacrev(no_batch_H_reg, argnums=0))
-        self._dH_dv = torch.vmap(torch.func.jacrev(no_batch_H_reg, argnums=1))
-        self.dH_dz = lambda z, v: self._dH_dz(z, v).squeeze(1)
-        self.dH_dv = lambda z, v: self._dH_dv(z, v).squeeze(1)
- 
-    def H_tilde_reg(self, z: Tensor, p: Tensor) -> Tensor:
-        """
-        Smoothed corrected Hamiltonian used ONLY by the integrator:
- 
-            n_delta   = sqrt(p^T G* p + delta),        delta = delta_rel^2 * d
-            F*_delta  = n_delta + <w*, p>              (>= (1 - beta*) n_delta > 0)
-            H_reg     = 1/2 F*_delta^2 - (d+1) log1p(<w*, p> / n_delta)
- 
-        Smooth in p everywhere (including p = 0); |grad_p| <= O((d+1)/sqrt(delta)).
-        Recovers self.H_tilde exactly as delta -> 0.
-        """
-        d = z.shape[1]
-        delta = (self.delta_rel ** 2) * d
- 
-        G_star = self.randers_cometric.G_star(z)
-        w_star = self.randers_cometric.omega_star(z)
- 
-        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        n_delta = torch.sqrt(p_Gstar_p + delta)
-        wstar_p = torch.einsum("bi,bi->b", w_star, p)
- 
-        F_delta = n_delta + wstar_p
-        return 0.5 * F_delta**2 - (d + 1) * torch.log1p(wstar_p / n_delta)
- 
-    def H_tilde(self, z: Tensor, p: Tensor) -> Tensor:
-        """
-        Exact corrected Hamiltonian for the acceptance step, with a tiny norm
-        clamp for NaN safety only (eps = 1e-12, negligible at any momentum the
-        chain actually visits). Overrides the parent to add the clamp.
-        """
-        d = z.shape[1]
-        F_star = self.randers_cometric(z, p)
-        w_star = self.randers_cometric.omega_star(z)
-        G_star = self.randers_cometric.G_star(z)
-        p_Gstar_p = torch.einsum("bi,bij,bj->b", p, G_star, p)
-        riem_norm = torch.sqrt(p_Gstar_p.clamp_min(1e-12))
-        wstar_p = torch.einsum("bi,bi->b", w_star, p)
-        log_randers_factor = torch.log1p(wstar_p / riem_norm)
-        return 0.5 * F_star**2 - (d + 1) * log_randers_factor
- 
