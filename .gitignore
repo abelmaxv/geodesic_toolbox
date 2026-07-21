@@ -7,3 +7,6 @@ build/*
 API_config/*
 internship_experiments/jobs
 internship_experiments/logs
+# macOS junk
+.DS_Store
+**/.DS_Store
