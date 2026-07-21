@@ -1,0 +1,5 @@
+# Generated animation media is too heavy to track — regenerate from the scripts.
+*.mp4
+*.gif
+*.png
+__pycache__/
