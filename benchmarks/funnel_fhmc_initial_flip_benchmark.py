@@ -1,7 +1,5 @@
 """
-Funnel / FHMC, exact Jacobian, no momentum flip.
-
-Exact log-det Jacobian
+Funnel / FHMC_initial (Randers leapfrog), reduced momentum flip.
 
 """
 import torch
@@ -13,7 +11,7 @@ torch.set_default_dtype(torch.float64)
 
 # Shared FHMC operating point; only reduced_flip and the Jacobian mode differs across the six variants.
 PARAMS = {"beta": 0.10, "l": 20, "N_fx": 8, "gamma": 0.20, "alpha": 10 ** 6,
-          "reg": 0.50, "method": "picard", "reduced_flip": False, "jacobian": "exact"}
+          "reg": 0.50, "method": "picard", "reduced_flip": True}
 N_BATCH = 10       # chains, matching the RHMC / NUTS runners
 N_RUN = 10000      # draws per chain, matching the RHMC / NUTS runners
 SEED = 0           # RNG seed for the momentum draws (reproducibility)
@@ -21,9 +19,9 @@ SEED = 0           # RNG seed for the momentum draws (reproducibility)
 if __name__ == "__main__":
     torch.manual_seed(SEED)
     z_0 = tgt.initial_states(N_BATCH, seed=777)
-    sampler = tgt.build_sampler("FHMC", PARAMS, N_RUN)
+    sampler = tgt.build_sampler("FHMC_INITIAL", PARAMS, N_RUN)
     reference = tgt.reference_samples(400, seed=12345)
     run_benchmark(
-        "FHMC", sampler, z_0, PARAMS, target=tgt.NAME,
+        "FHMC_INITIAL_FLIP", sampler, z_0, PARAMS, target=tgt.NAME,
         score_fn=tgt.score, reference_samples=reference,
     )

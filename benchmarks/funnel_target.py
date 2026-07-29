@@ -11,10 +11,12 @@ import torch
 from torch import Tensor
 
 from geodesic_toolbox import (
-    HMCSampler, ImplicitRHMCSampler, FHMC, FHMC_initial, IdentityCoMetric,
+    HMCSampler, ImplicitRHMCSampler, ImplicitMidpointRHMCSampler, FHMC,
+    FHMC_initial, IdentityCoMetric,
 )
 from geodesic_toolbox.cometric import (
-    FunnelSoftAbs, FunnelScore, RandersMetrics, DualRandersMetrics,
+    FunnelSoftAbs, FunnelScore, FunnelScoreTanh, FunnelSkewness,
+    RandersMetrics, DualRandersMetrics,
 )
 from benchmark_utils import NUTS, funnel_exact_samples
 
@@ -59,32 +61,30 @@ def initial_states(n: int, seed: int | None = None) -> Tensor:
 
 # ── Metric ────────────────────────────────────────────────────────────────────
 
-class FunnelSoftAbsRobust(FunnelSoftAbs):
-    """FunnelSoftAbs with a scale-normalized eigendecomposition: at extreme
-    states (v ~ -6) the Hessian entries reach ~1e5 and LAPACK eigh can fail to
-    converge, aborting a batch. Since lam(H/s) * s = lam(H), decomposing the
-    normalized matrix is identical and numerically robust."""
-
-    def forward(self, q: Tensor) -> Tensor:
-        H = self._hessian(q)
-        eps_reg = 1e-3 * torch.arange(H.shape[-1], device=q.device, dtype=q.dtype)
-        H = H + torch.diag(eps_reg).unsqueeze(0)
-        s = H.abs().amax(dim=(-2, -1), keepdim=True).clamp_min(1.0)
-        lam_n, Phi = torch.linalg.eigh(H / s)
-        lam = lam_n * s.squeeze(-1)
-        alpha_lam = self.alpha * lam
-        cometric_eigs = torch.where(
-            lam.abs() > 1e-8,
-            torch.tanh(alpha_lam) / lam,
-            torch.full_like(lam, self.alpha),
-        )
-        return torch.einsum("bij,bj,bkj->bik", Phi, cometric_eigs, Phi)
+# FunnelSoftAbsRobust used to re-implement FunnelSoftAbs with a
+# scale-normalized eigendecomposition (LAPACK eigh can fail on the funnel's
+# wildly-scaled Hessian). That normalization now lives inside
+# cometric.softabs_cometric, which FunnelSoftAbs uses, so the subclass is
+# redundant; the alias is kept so existing scripts keep importing.
+FunnelSoftAbsRobust = FunnelSoftAbs
 
 
-def dual_randers(alpha: float, beta: float) -> DualRandersMetrics:
-    cometric = FunnelSoftAbsRobust(DIM, alpha)
-    omega = FunnelScore(DIM, alpha, cometric=cometric)
-    randers = RandersMetrics(base_cometric=cometric, omega=omega, beta=beta)
+def dual_randers(alpha: float, beta: float, omega: str = "sigmoid",
+                 n0: float = 4.0) -> DualRandersMetrics:
+    """omega="sigmoid" is the original FunnelScore; "tanh" is FunnelScoreTanh,
+    whose 1-form is position dependent and keeps ||b|| away from the Randers
+    degeneracy boundary. The two are NOT comparable at equal beta -- compare at
+    matched ||b||."""
+    cometric = FunnelSoftAbs(DIM, alpha)
+    if omega == "tanh":
+        om = FunnelScoreTanh(DIM, alpha, cometric=cometric, n0=n0)
+    elif omega == "skewness":
+        om = FunnelSkewness(DIM, alpha, cometric=cometric, n0=n0)
+    elif omega == "sigmoid":
+        om = FunnelScore(DIM, alpha, cometric=cometric)
+    else:
+        raise ValueError(f"unknown omega {omega!r}")
+    randers = RandersMetrics(base_cometric=cometric, omega=om, beta=beta)
     return DualRandersMetrics(randers)
 
 
@@ -122,16 +122,33 @@ def build_sampler(method: str, params: dict, N_run: int):
         return FunnelHMC(mass=params["mass"], l=params["l"], gamma=params["gamma"],
                          N_run=N_run)
     if method == "RHMC":
+        # threshold_fx defaults to 1e-5 in ImplicitRHMCSampler; forward it so the
+        # paper's fixed-point tolerance (1e-6) is reachable from PARAMS.
         return FunnelRHMC(l=params["l"], N_fx=params["N_fx"], gamma=params["gamma"],
-                          N_run=N_run, alpha=params.get("alpha", 10 ** 6))
+                          N_run=N_run, alpha=params.get("alpha", 10 ** 6),
+                          threshold_fx=params.get("threshold_fx", 1e-5))
+    if method == "RHMC_MIDPOINT":
+        return ImplicitMidpointRHMCSampler(
+            target, FunnelSoftAbsRobust(dim=DIM, alpha=params.get("alpha", 10 ** 6)),
+            l=params["l"], N_fx=params["N_fx"], gamma=params["gamma"], N_run=N_run,
+            reduced_flip=params.get("reduced_flip", True),
+            threshold_fx=params.get("threshold_fx", 1e-12),
+        )
     if method == "FHMC":
-        cometric = dual_randers(alpha=params["alpha"], beta=params["beta"])
+        cometric = dual_randers(alpha=params["alpha"], beta=params["beta"],
+                                omega=params.get("omega", "sigmoid"),
+                                n0=params.get("n0", 4.0))
         return FHMC(target, cometric, l=params["l"], N_fx=params["N_fx"],
                     gamma=params["gamma"], N_run=N_run, reg=params.get("reg", 0.05),
                     method=params.get("method", "picard"),
-                    reduced_flip=params.get("reduced_flip", True))
+                    reduced_flip=params.get("reduced_flip", True),
+                    jacobian=params.get("jacobian", "exact"),
+                    jacobian_mc=params.get("jacobian_mc", 1),
+                    russian_roulette=params.get("russian_roulette", 0.5))
     if method == "FHMC_INITIAL":
-        cometric = dual_randers(alpha=params["alpha"], beta=params["beta"])
+        cometric = dual_randers(alpha=params["alpha"], beta=params["beta"],
+                                omega=params.get("omega", "sigmoid"),
+                                n0=params.get("n0", 4.0))
         return FHMC_initial(target, cometric, l=params["l"], N_fx=params["N_fx"],
                             gamma=params["gamma"], N_run=N_run,
                             reduced_flip=params.get("reduced_flip", True))

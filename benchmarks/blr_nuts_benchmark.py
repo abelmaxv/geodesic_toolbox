@@ -1,8 +1,6 @@
 """
-Bayesian logistic regression / NUTS benchmark -- one fixed configuration.
+Bayesian logistic regression / NUTS benchmark
 NUTS is self-tuning (dual-averaging); only warm-up / target-acceptance are set.
-
-    cd benchmarks && python blr_nuts_benchmark.py
 """
 import torch
 
@@ -20,8 +18,10 @@ PARAMS = {
 }
 N_BATCH = 20      # parallel chains
 N_RUN = 1000      # samples per chain
+SEED = 0          # RNG seed for the momentum draws (reproducibility)
 
 if __name__ == "__main__":
+    torch.manual_seed(SEED)
     z_0 = tgt.initial_states(N_BATCH, seed=777)
     sampler = tgt.build_sampler("NUTS", PARAMS, N_RUN)
     reference = tgt.reference_samples(400, seed=12345) if hasattr(tgt, "reference_samples") else None
