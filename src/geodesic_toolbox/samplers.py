@@ -11,6 +11,105 @@ from .cometric import CoMetric, mat_sqrt, RandersMetrics, DualRandersMetrics
 import warnings
 
 
+def integrate_isolating_failures(
+    integrator: Callable, x_0: Tensor, dirs: Tensor | None = None
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Integrate a batch, isolating the samples whose integration fails.
+
+    ``torch.linalg`` errors are batch-wide: the exception names no sample, so a
+    caller that simply catches it has to throw away every proposal in the batch.
+    In MCMC that is severe -- one chain which has left the domain rejects the
+    proposals of all the others, and with enough chains the acceptance rate
+    collapses to 0 while each chain on its own would have sampled fine.
+
+    On failure the batch is retried one sample at a time, which identifies the
+    offenders exactly; only they are marked invalid. The retry costs one call
+    per sample but is paid only on a failing step. ``cometric.safe_eigh``
+    removes the common cause (a non-finite Hessian reaching eigh), so this is
+    the backstop for the remaining factorizations -- inverse, Cholesky, slogdet.
+
+    Parameters
+    ----------
+    integrator : Callable
+        Called as ``integrator(x, dirs=dirs)``, returning ``(x_l, log_det)``.
+    x_0 : Tensor (b, 2d)
+        Batch of initial states.
+    dirs : Tensor (b,) | None
+        Per-sample integration direction, forwarded to the integrator.
+
+    Returns
+    -------
+    (Tensor (b, 2d), Tensor (b,), Tensor (b,) bool)
+        Final states, log-Jacobians, and a validity mask. Where the mask is
+        False the integration failed, the state is left at ``x_0`` and the
+        caller must reject the sample.
+    """
+    b = x_0.shape[0]
+    valid = torch.ones(b, dtype=torch.bool, device=x_0.device)
+    try:
+        x_l, log_det = integrator(x_0, dirs=dirs)
+        return x_l, log_det, valid
+    except _LinAlgError:
+        pass
+
+    x_l = x_0.clone()
+    log_det = torch.zeros(b, device=x_0.device, dtype=x_0.dtype)
+    for i in range(b):
+        try:
+            x_i, log_det_i = integrator(
+                x_0[i : i + 1], dirs=None if dirs is None else dirs[i : i + 1]
+            )
+            x_l[i], log_det[i] = x_i[0], log_det_i[0]
+        except _LinAlgError:
+            valid[i] = False
+    return x_l, log_det, valid
+
+
+def propose_isolating_failures(
+    leapfrog: Callable, get_alpha: Callable, z: Tensor, v_0: Tensor
+) -> tuple[Tensor, Tensor]:
+    """
+    Leapfrog-sampler counterpart of ``integrate_isolating_failures``: build a
+    proposal and its acceptance probability, retrying one sample at a time if
+    the batched call raises, so a single failing chain does not force every
+    other chain's proposal to be rejected. See that function for the rationale.
+
+    Parameters
+    ----------
+    leapfrog : Callable
+        Called as ``leapfrog(z, v)``, returning ``(z_l, v_l)``.
+    get_alpha : Callable
+        Called as ``get_alpha(z, v_0, z_l, v_l)``, returning ``(b,)``.
+    z : Tensor (b, d)
+        Current positions.
+    v_0 : Tensor (b, d)
+        Sampled momenta.
+
+    Returns
+    -------
+    (Tensor (b, d), Tensor (b,))
+        Proposed positions and their acceptance probabilities. Samples whose
+        proposal failed keep their current position and get alpha = 0.
+    """
+    try:
+        z_l, v_l = leapfrog(z, v_0)
+        return z_l, get_alpha(z, v_0, z_l, v_l)
+    except _LinAlgError:
+        pass
+
+    z_l = z.clone()
+    alpha = torch.zeros(z.shape[0], device=z.device, dtype=z.dtype)
+    for i in range(z.shape[0]):
+        try:
+            z_i, v_i = leapfrog(z[i : i + 1], v_0[i : i + 1])
+            z_l[i] = z_i[0]
+            alpha[i] = get_alpha(z[i : i + 1], v_0[i : i + 1], z_i, v_i)[0]
+        except _LinAlgError:
+            pass  # keeps z_l[i] = z[i] and alpha[i] = 0
+    return z_l, alpha
+
+
 class Sampler(nn.Module):
     """
     Base class for the MCMC samplers. It defines the interface for the samplers.
@@ -690,16 +789,11 @@ class HMCSampler(Sampler):
         for k in pbar:
             v_0 = self.sample_momentum(z)
 
-            try:
-                z_l, v_l = self.leapfrog(z, v_0)
-                alpha = self.get_alpha(z, v_0, z_l, v_l)
-            except _LinAlgError:
-                # @TODO: Handle this error properly.
-                # Not the best way to handle this error.
-                # Because a single LinAlgError for a given sample
-                # will stop the whole process even for other valid samples.
-                alpha = torch.zeros(z.shape[0], device=z.device)
-                z_l = z.clone()
+            # A linear-algebra failure is batch-wide and anonymous, so isolate
+            # the offending samples instead of rejecting the whole batch.
+            z_l, alpha = propose_isolating_failures(
+                self.leapfrog, self.get_alpha, z, v_0
+            )
 
             if not self.skip_acceptance:
                 u = torch.rand_like(alpha)
@@ -1262,16 +1356,11 @@ class ImplicitRHMCSampler(Sampler):
 
         for k in pbar:
             v_0 = self.sample_momentum(z)
-            try:
-                z_l, v_l = self.leapfrog(z, v_0)
-                alpha = self.get_alpha(z, v_0, z_l, v_l)
-            except _LinAlgError:
-                # @TODO: Handle this error properly.
-                # Not the best way to handle this error.
-                # Because a single LinAlgError for a given sample
-                # will stop the whole process even for other valid samples.
-                alpha = torch.zeros(z.shape[0], device=z.device)
-                z_l = z.clone()
+            # A linear-algebra failure is batch-wide and anonymous, so isolate
+            # the offending samples instead of rejecting the whole batch.
+            z_l, alpha = propose_isolating_failures(
+                self.leapfrog, self.get_alpha, z, v_0
+            )
 
             if not self.skip_acceptance:
                 u = torch.rand_like(alpha)
@@ -2308,6 +2397,389 @@ class ExplicitRHMCSampler(Sampler):
         return z_0
 
 
+class ImplicitMidpointIntegratorHamiltonian(torch.nn.Module):
+    """
+    Implicit midpoint integrator specialised to a canonical Hamiltonian
+    vector field f(z, p) = (dH/dp, -dH/dz) on the concatenated state
+    x = (z, p). Applied to a canonical field, implicit midpoint is
+    symplectic, hence exactly volume preserving: the log-Jacobian of every
+    step is identically 0 (det = 1), so unlike ``ImplicitMidpointIntegrator``
+    (built for the non-canonical ``FHMC`` field, which needs an explicit
+    exact/estimated log-det correction) this integrator never computes one.
+    Drop-in replacement for ``ImplicitMidpointIntegrator`` in the same MCMC
+    loop (same ``forward`` signature and return values).
+
+    Parameters
+    ----------
+    H : Callable[[Tensor, Tensor], Tensor]
+        Hamiltonian H(z, p), maps (b, d), (b, d) -> (b,).
+    gamma : float
+        Step size.
+    l : int
+        Number of integration steps.
+    N_fx : int
+        Maximum number of fixed-point (Picard) iterations per step.
+    threshold_fx : float
+        Convergence tolerance of the fixed-point iteration: it stops once the
+        largest per-coordinate change falls below this. Brofos & Lederman
+        iterate to a tolerance with no iteration cap (their algorithm 1) and
+        report ESS at delta = 1e-6, so pass 1e-6 with a generous N_fx to match
+        them; the 1e-12 default solves far tighter and costs about twice the
+        iterations.
+    """
+
+    def __init__(
+        self,
+        H: Callable[[Tensor, Tensor], Tensor],
+        gamma: float,
+        l: int,
+        N_fx: int,
+        threshold_fx: float = 1e-12,
+    ):
+        super().__init__()
+        self.H = H
+        self.gamma = gamma
+        self.l = l
+        self.N_fx = N_fx
+        self.threshold_fx = threshold_fx
+
+        # Per-sample gradients to avoid materializing a full (b, b, d)
+        # Jacobian. Same idiom as ImplicitLeapfrogIntegrator / FHMC_initial.
+        no_batch_H = lambda z, p: self.H(z.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
+        self._dH_dz = torch.vmap(torch.func.jacrev(no_batch_H, argnums=0))
+        self._dH_dp = torch.vmap(torch.func.jacrev(no_batch_H, argnums=1))
+
+    @torch.enable_grad()
+    def f(self, x: Tensor) -> Tensor:
+        """
+        Canonical vector field f(x) = (dH/dp, -dH/dz). x, output (b, 2d).
+
+        ``enable_grad`` is mandatory, not an optimization: the MCMC loop runs
+        under ``torch.no_grad()``, and in that mode vmap(jacrev(...)) through
+        ``torch.linalg.eigh`` (the SoftAbs metric) returns SILENTLY WRONG
+        values -- batch element 0 is correct and the error grows with the batch
+        index (observed up to 1e13x on torch 2.12). Nothing raises; the field
+        just explodes, the integrator leaves the domain and acceptance collapses
+        to 0. Same failure mode as the vmap(jacfwd) batch corruption that the
+        FHMC field was rewritten analytically to avoid.
+        """
+        d = x.shape[-1] // 2
+        z, p = x[:, :d], x[:, d:]
+        return torch.cat([self._dH_dp(z, p), -self._dH_dz(z, p)], dim=-1)
+
+    def picard(self, x0: Tensor, gamma: Tensor) -> Tensor:
+        x1 = x0.clone()
+        for _ in range(self.N_fx):
+            x_mid = (x1 + x0) / 2
+            x1_ = x0 + gamma * self.f(x_mid)
+            # Same stopping rule as Brofos & Lederman algorithm 1: largest
+            # per-coordinate change below the tolerance.
+            delta = (x1_ - x1).abs().max()
+            x1 = x1_
+            if delta < self.threshold_fx:
+                break
+        return x1
+
+    def forward(self, x0: Tensor, return_traj: bool = False, dirs: Tensor | None = None):
+        """
+        Integrate l steps starting from x0 = (z, p).
+
+        Parameters
+        ----------
+        x0 : Tensor (b, 2d)
+            Initial concatenated state.
+        return_traj : bool
+            If True, return the full trajectory (b, l+1, 2d) instead of the
+            final state.
+        dirs : Tensor (b,) | None
+            Per-batch integration direction (+1 forward, -1 backward). If
+            None, all samples are integrated forward.
+
+        Returns
+        -------
+        (Tensor, Tensor)
+            The final state (or trajectory) and the log-Jacobian of the
+            discrete map, shape (b,) (identically zero: implicit midpoint
+            applied to a canonical field is symplectic).
+        """
+        if dirs is None:
+            gamma = torch.full(
+                (x0.shape[0], 1), self.gamma, device=x0.device, dtype=x0.dtype
+            )
+        else:
+            gamma = self.gamma * dirs.reshape(-1, 1).to(device=x0.device, dtype=x0.dtype)
+
+        if return_traj:
+            traj = [x0.clone()]
+        for _ in range(self.l):
+            x0 = self.picard(x0, gamma)
+            if return_traj:
+                traj.append(x0.clone())
+
+        log_det = torch.zeros(x0.shape[0], device=x0.device, dtype=x0.dtype)
+        if return_traj:
+            traj = torch.stack(traj, dim=1)
+            return traj, log_det
+        return x0, log_det
+
+class ImplicitMidpointRHMCSampler(torch.nn.Module):
+    """
+    Riemannian HMC sampler with the canonical dynamics, integrated with the
+    implicit midpoint scheme applied directly to the doubled state x = (z, p)
+    (see ``ImplicitMidpointIntegratorHamiltonian``). Momentum is drawn from
+    N(0, G(z)) and the trajectory follows the canonical Hamiltonian
+
+        H(z, p) = -log target(z) + 1/2 p^T G(z)^-1 p + 1/2 log det G(z),
+
+    with G(z) an arbitrary position-dependent Riemannian metric (e.g. a
+    SoftAbs metric built from the Hessian of -log target, or the identity for
+    plain HMC). Implicit midpoint applied to this canonical field is
+    symplectic, hence exactly volume preserving (det = 1), so acceptance
+    reduces to the plain energy difference of H: no Jacobian correction is
+    needed, unlike ``FHMC`` (whose corrected-dynamics field is non-canonical
+    and requires one).
+
+    Parameters
+    ----------
+    target : Callable[[Tensor], Tensor]
+        Unnormalized target density, maps (b, d) positions to (b,) densities.
+        Must be differentiable with torch.
+    cometric : CoMetric
+        The Riemannian metric G(z) driving the kinetic energy and the
+        momentum distribution.
+    l : int
+        Number of integrator steps per proposal.
+    N_fx : int
+        Maximum number of Picard fixed-point iterations per midpoint step.
+    threshold_fx : float
+        Fixed-point convergence tolerance (see
+        ``ImplicitMidpointIntegratorHamiltonian``). Use 1e-6 with a generous
+        N_fx to match Brofos & Lederman.
+    gamma : float
+        Integrator step size.
+    N_run : int
+        Number of MCMC iterations.
+    pbar : bool
+        If True, shows a progress bar when sampling.
+    skip_acceptance : bool
+        If True, proposals are always accepted (no Metropolis correction).
+    reduced_flip : bool
+        If True, uses the reduced momentum flip (Sohl-Dickstein 2012) on the
+        integration direction upon rejection.
+    """
+
+    def __init__(
+        self,
+        target: Callable[[Tensor], Tensor],
+        cometric: CoMetric,
+        l: int,
+        N_fx: int,
+        gamma: float,
+        N_run: int,
+        pbar: bool = False,
+        skip_acceptance=False,
+        reduced_flip: bool = True,
+        threshold_fx: float = 1e-12,
+    ):
+        super().__init__()
+        self.target = target
+        self.cometric = cometric
+        self.l = l
+        self.N_fx = N_fx
+        self.gamma = gamma
+        self.N_run = N_run
+        self.pbar = pbar
+        self.skip_acceptance = skip_acceptance
+        self.reduced_flip = reduced_flip
+        self.threshold_fx = threshold_fx
+        self.log2pi = math.log(2.0 * math.pi)
+
+        self.integrator = ImplicitMidpointIntegratorHamiltonian(
+            self.H, gamma, l, N_fx, threshold_fx
+        )
+
+    # ------------------------------------------------------------------
+    # Energies (exact, used by the acceptance step)
+    # ------------------------------------------------------------------
+
+    def U(self, z: Tensor) -> Tensor:
+        """Potential energy U(z) = -log target(z). Shape (b,)."""
+        return -torch.log(self.target(z))
+
+    def K(self, z: Tensor, p: Tensor) -> Tensor:
+        """
+        Kinetic energy of p ~ N(0, G(z)):
+        K(z, p) = 1/2 p^T G(z)^-1 p + 1/2 log det G(z) + d/2 log 2pi.
+        """
+        d = z.shape[1]
+        p_Ginv_p = self.cometric.cometric(z, p)
+        log_det_G = -self.cometric.inv_logdet(z)
+        return 0.5 * p_Ginv_p + 0.5 * log_det_G + 0.5 * d * self.log2pi
+
+    def H(self, z: Tensor, p: Tensor) -> Tensor:
+        """Canonical Hamiltonian H(z, p) = U(z) + K(z, p)."""
+        return self.U(z) + self.K(z, p)
+
+    # ------------------------------------------------------------------
+    # MCMC
+    # ------------------------------------------------------------------
+
+    def sample_momentum(self, z: Tensor) -> Tensor:
+        """Draw p ~ N(0, G(z))."""
+        G = self.cometric.metric_tensor(z)
+        p = torch.randn_like(z)
+        if self.cometric.is_diag:
+            p = p * G.sqrt()
+        else:
+            p = torch.einsum("bij,bi->bj", mat_sqrt(G), p)
+        return p
+
+    def proposal_rate(self, x_0: Tensor, x_l: Tensor, log_det: Tensor) -> Tensor:
+        """
+        Metropolis-Hastings acceptance probability of the proposal x_l obtained
+        from x_0 by the implicit midpoint map with log-Jacobian log_det (= 0
+        here, the map is symplectic):
+
+            alpha = min(1, exp(H(x_0) - H(x_l) + log_det)).
+
+        Shapes: x_0, x_l (b, 2d); log_det (b,); output (b,).
+        """
+        d = x_0.shape[-1] // 2
+        log_alpha = (
+            self.H(x_0[:, :d], x_0[:, d:])
+            - self.H(x_l[:, :d], x_l[:, d:])
+            + log_det
+        )
+        alpha = torch.exp(torch.clamp(log_alpha, max=0.0))
+        return torch.nan_to_num(alpha, nan=0.0)
+
+    @torch.no_grad()
+    def sample(
+        self, z_0: Tensor, return_traj=False, progress=False, return_acceptance=False, return_flip=False
+    ) -> Tensor | tuple[Tensor, float]:
+        """
+        Given an initial sample z_0, it returns a new sample from the target
+        distribution.
+
+        Parameters
+        ----------
+        z_0 : Tensor (b,d)
+            The initial sample.
+        return_traj : bool
+            If True, it returns the trajectory of the samples aswell as the
+            acceptance rate.
+        progress : bool
+            If True, it shows a progress bar when sampling.
+        return_acceptance : bool
+            If True, it returns the sample aswell as the acceptance rate.
+        return_flip : bool
+            If True, it returns the proportion of direction flips over all steps.
+
+        Returns
+        -------
+        Tensor (b,d)
+            The new samples.
+        or
+        (Tensor (b,N_run,d) , float)
+            The trajectory of the samples (the initial sample is the first
+            element) and the acceptance rate.
+        or
+        (Tensor (b,d), float)
+            The new samples and the acceptance rate.
+        """
+        accepted_samples = 0
+        flipped_samples = 0
+        z = z_0.clone()
+        d = z.shape[1]
+        dirs = torch.ones(z.shape[0], device=z_0.device, dtype=z_0.dtype)
+
+        if return_traj:
+            traj = [z.clone()]
+
+        if progress or self.pbar:
+            pbar = tqdm(range(self.N_run), desc="Sampling", unit="steps")
+        else:
+            pbar = range(self.N_run)
+
+        for k in pbar:
+            p_0 = self.sample_momentum(z)
+            x_0 = torch.cat([z, p_0], dim=-1)
+            # A linear-algebra failure is batch-wide and anonymous, so isolate
+            # the offending samples instead of rejecting the whole batch: one
+            # chain that has left the domain must not veto the others.
+            x_l, log_det, valid = integrate_isolating_failures(
+                self.integrator, x_0, dirs
+            )
+            alpha = self.proposal_rate(x_0, x_l, log_det)
+            alpha = torch.where(valid, alpha, torch.zeros_like(alpha))
+            z_l = x_l[:, :d]
+
+            if not self.skip_acceptance:
+                u = torch.rand_like(alpha)
+                accept_mask = u < alpha
+                if self.reduced_flip:
+                    rej_idx = (~accept_mask).nonzero(as_tuple=False).squeeze(-1)
+                    if rej_idx.numel() > 0:
+                        # Reduced momentum flip (Sohl-Dickstein 2012, Eq. 11)
+                        # applied to the integration direction:
+                        # P_flip = max(0, alpha(LFζ) - alpha(Lζ))
+                        # Only computed for rejected samples.
+                        x_l_flip, log_det_flip, valid_flip = (
+                            integrate_isolating_failures(
+                                self.integrator, x_0[rej_idx], -dirs[rej_idx]
+                            )
+                        )
+                        alpha_flip_rej = self.proposal_rate(
+                            x_0[rej_idx], x_l_flip, log_det_flip
+                        )
+                        alpha_flip_rej = torch.where(
+                            valid_flip, alpha_flip_rej, torch.zeros_like(alpha_flip_rej)
+                        )
+                        alpha_flip = torch.zeros_like(alpha)
+                        alpha_flip[rej_idx] = alpha_flip_rej
+                        p_flip = (alpha_flip - alpha).clamp(min=0)
+                        flip_mask = ~accept_mask & (u < alpha + p_flip)
+                    else:
+                        flip_mask = ~accept_mask  # all False, no rejections
+                else:
+                    flip_mask = ~accept_mask
+                z = torch.where(accept_mask[:, None], z_l, z)
+                dirs = torch.where(flip_mask, -dirs, dirs)
+                accepted_samples += accept_mask.sum().item()
+                flipped_samples += flip_mask.sum().item()
+            else:
+                # Even without the Metropolis correction, never adopt an
+                # invalid state (integration blow-up, or a finite state
+                # outside the region where the metric is defined): the
+                # momentum sampler could not be evaluated there. Such states
+                # are exactly those with alpha = 0 (NaN energies are mapped
+                # to alpha = 0 by proposal_rate).
+                valid_mask = torch.isfinite(z_l).all(dim=-1) & (alpha > 0)
+                z = torch.where(valid_mask[:, None], z_l, z)
+                accepted_samples += z.shape[0]
+
+            if return_traj:
+                traj.append(z.clone())
+
+            if progress or self.pbar:
+                pbar.set_postfix(
+                    {"acceptance_rate": accepted_samples / ((k + 1) * z_0.shape[0])}
+                )
+
+        acceptance_rate = accepted_samples / (self.N_run * z_0.shape[0])
+        flip_rate = flipped_samples / (self.N_run * z_0.shape[0])
+
+        if return_traj:
+            traj = torch.stack(traj, dim=1)
+            if return_acceptance:
+                return (traj, acceptance_rate, flip_rate) if return_flip else (traj, acceptance_rate)
+            return (traj, flip_rate) if return_flip else traj
+        if return_acceptance:
+            return (z, acceptance_rate, flip_rate) if return_flip else (z, acceptance_rate)
+        return (z, flip_rate) if return_flip else z
+
+
+
 class RandersLeapfrogIntegrator(torch.nn.Module):
     """
     Implicit (generalized) leapfrog integrator for a non-separable Hamiltonian
@@ -2498,8 +2970,17 @@ class FHMC_initial(torch.nn.Module):
         no_batch_H = lambda z, p: self.H(z.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
         self._dH_dz = torch.vmap(torch.func.jacrev(no_batch_H, argnums=0))
         self._dH_dp = torch.vmap(torch.func.jacrev(no_batch_H, argnums=1))
-        self.dH_dz = lambda z, p: self._dH_dz(z, p).squeeze(1)
-        self.dH_dp = lambda z, p: self._dH_dp(z, p).squeeze(1)
+        # enable_grad is MANDATORY, not an optimization: sample() runs under
+        # torch.no_grad(), and in that mode vmap(jacrev(...)) through
+        # torch.linalg.eigh (the SoftAbs base metric) returns SILENTLY WRONG
+        # values -- batch element 0 is correct and the error grows with the batch
+        # index (measured up to 5e14x on torch 2.12). Nothing raises; acceptance
+        # just collapses. Same defect as
+        # ImplicitMidpointIntegratorHamiltonian.f, which carries the same guard.
+        self.dH_dz = torch.enable_grad()(
+            lambda z, p: self._dH_dz(z, p).squeeze(1))
+        self.dH_dp = torch.enable_grad()(
+            lambda z, p: self._dH_dp(z, p).squeeze(1))
 
         self.momentum_sampler = MomentumSampler(randers_cometric)
         self.integrator = RandersLeapfrogIntegrator(
@@ -2637,16 +3118,14 @@ class FHMC_initial(torch.nn.Module):
         for k in pbar:
             p_0 = self.sample_momentum(z)
             x_0 = torch.cat([z, p_0], dim=-1)
-            try:
-                x_l, log_det = self.integrator(x_0, dirs=dirs)
-                alpha = self.proposal_rate(x_0, x_l, log_det)
-            except _LinAlgError:
-                # @TODO: Handle this error properly.
-                # Not the best way to handle this error.
-                # Because a single LinAlgError for a given sample
-                # will stop the whole process even for other valid samples.
-                alpha = torch.zeros(z.shape[0], device=z.device)
-                x_l = x_0.clone()
+            # A linear-algebra failure is batch-wide and anonymous, so isolate
+            # the offending samples instead of rejecting the whole batch: one
+            # chain that has left the domain must not veto the others.
+            x_l, log_det, valid = integrate_isolating_failures(
+                self.integrator, x_0, dirs
+            )
+            alpha = self.proposal_rate(x_0, x_l, log_det)
+            alpha = torch.where(valid, alpha, torch.zeros_like(alpha))
             z_l = x_l[:, :d]
 
             if not self.skip_acceptance:
@@ -2659,15 +3138,17 @@ class FHMC_initial(torch.nn.Module):
                         # applied to the integration direction:
                         # P_flip = max(0, alpha(LFζ) - alpha(Lζ))
                         # Only computed for rejected samples.
-                        try:
-                            x_l_flip, log_det_flip = self.integrator(
-                                x_0[rej_idx], dirs=-dirs[rej_idx]
+                        x_l_flip, log_det_flip, valid_flip = (
+                            integrate_isolating_failures(
+                                self.integrator, x_0[rej_idx], -dirs[rej_idx]
                             )
-                            alpha_flip_rej = self.proposal_rate(
-                                x_0[rej_idx], x_l_flip, log_det_flip
-                            )
-                        except _LinAlgError:
-                            alpha_flip_rej = torch.zeros(rej_idx.numel(), device=z.device)
+                        )
+                        alpha_flip_rej = self.proposal_rate(
+                            x_0[rej_idx], x_l_flip, log_det_flip
+                        )
+                        alpha_flip_rej = torch.where(
+                            valid_flip, alpha_flip_rej, torch.zeros_like(alpha_flip_rej)
+                        )
                         alpha_flip = torch.zeros_like(alpha)
                         alpha_flip[rej_idx] = alpha_flip_rej
                         p_flip = (alpha_flip - alpha).clamp(min=0)
@@ -2736,6 +3217,8 @@ class ImplicitMidpointIntegrator(torch.nn.Module) :
         Number of fixed-point (picard) or Newton iterations per step.
     method : str
         "picard" or "newton".
+    jacobian : str
+        "estimate" or "exact".
     """
 
     def __init__(
@@ -2745,7 +3228,11 @@ class ImplicitMidpointIntegrator(torch.nn.Module) :
         gamma : float,
         l : int,
         N_fx : int,
-        method : str= "picard"):
+        method : str= "picard",
+        jacobian : str= "exact",
+        jacobian_mc : int = 1,
+        russian_roulette : float = 0.5
+        ):
         super().__init__()
 
         self.f = f
@@ -2754,6 +3241,9 @@ class ImplicitMidpointIntegrator(torch.nn.Module) :
         self.l = l
         self.N_fx = N_fx
         self.method = method
+        self.jacobian = jacobian
+        self.russian_roulette = russian_roulette
+        self.jacobian_mc = jacobian_mc
 
     def picard(self, x0 : Tensor, gamma : Tensor) :
         x1 = x0.clone()
@@ -2762,11 +3252,6 @@ class ImplicitMidpointIntegrator(torch.nn.Module) :
             x1_ = x0 + gamma * self.f(x_mid)
             delta = (x1_ - x1).abs().max()
             x1 = x1_
-            # Early exit once the fixed point has converged (same pattern as
-            # the repo's other implicit integrators); the field evaluation
-            # dominates the step cost, so this roughly halves it when the
-            # contraction is fast. NaN deltas (diverging samples) never
-            # compare true, so divergent batches still run all N_fx iters.
             if delta < 1e-12:
                 break
         return x1
@@ -2783,6 +3268,58 @@ class ImplicitMidpointIntegrator(torch.nn.Module) :
             x1 = x1 - torch.linalg.solve(J, residual)
         return x1
 
+    def exact_log_det_jac(self, x_mid : Tensor, gamma : Tensor) : 
+        D = self.df(x_mid)
+        I = torch.eye(D.shape[-1], device=D.device, dtype=D.dtype)
+        gamma_D = 0.5 * gamma.unsqueeze(-1) * D
+        _, logabsdet_plus = torch.linalg.slogdet(I + gamma_D)
+        _, logabsdet_minus = torch.linalg.slogdet(I - gamma_D)
+        delta = logabsdet_plus - logabsdet_minus
+        return delta
+
+    def estimate_log_det_jac(self, x_mid : Tensor, gamma : Tensor) :
+        """
+        Unbiased matrix-free estimate of the step log-Jacobian
+
+            Delta log J = 2 sum_{j>=0} tr(A^{2j+1}) / (2j+1),  A = gamma/2 df(x_mid),
+
+        Traces use Hutchinson's estimator with self.jacobian_mc Rademacher
+        probes and JVPs of f (the Jacobian is never formed); the series is
+        truncated by russian roulette with a Geometric(self.russian_roulette)
+        number of terms, each reweighted by its survival probability.
+        Converges for spectral radius of A below 1 (small gamma).
+
+        Shapes: x_mid (b, n); gamma (b, 1); output (b,).
+        """
+        b = x_mid.shape[0]
+        # Number of odd-order terms, shared across the batch.
+        N = int(torch.empty(1).geometric_(self.russian_roulette).item())
+
+        jvp_fn = lambda w: torch.func.jvp(self.f, (x_mid,), (w,))[1]
+        half_gamma = 0.5 * gamma  # (b, 1)
+        q = 1.0 - self.russian_roulette
+        delta = torch.zeros(b, device=x_mid.device, dtype=x_mid.dtype)
+        for _ in range(self.jacobian_mc):
+            # Rademacher probe (b, n).
+            v = (
+                torch.randint(0, 2, x_mid.shape, device=x_mid.device)
+                .to(dtype=x_mid.dtype)
+                .mul_(2)
+                .sub_(1)
+            )
+            w = half_gamma * jvp_fn(v)  # A^1 v
+            for j in range(N):
+                k = 2 * j + 1
+                if j > 0:
+                    # Advance from A^{k-2} v to A^k v with two JVPs.
+                    w = half_gamma * jvp_fn(half_gamma * jvp_fn(w))
+                # Hutchinson estimate of tr(A^k).
+                trace_k = (v * w).sum(dim=-1)
+                delta = delta + trace_k / (k * q**j)
+        return 2.0 * delta / self.jacobian_mc
+
+
+
 
     def one_step(self, x0 : Tensor, gamma : Tensor):
         if self.method == "picard" :
@@ -2790,12 +3327,7 @@ class ImplicitMidpointIntegrator(torch.nn.Module) :
         elif self.method == "newton" :
             x1 = self.newton(x0, gamma)
         x_mid = (x1+x0)/2
-        D = self.df(x_mid)
-        I = torch.eye(D.shape[-1], device=D.device, dtype=D.dtype)
-        gamma_D = 0.5 * gamma.unsqueeze(-1) * D
-        _, logabsdet_plus = torch.linalg.slogdet(I + gamma_D)
-        _, logabsdet_minus = torch.linalg.slogdet(I - gamma_D)
-        delta = logabsdet_plus - logabsdet_minus
+        delta = self.estimate_log_det_jac(x_mid, gamma) if (self.jacobian == "estimate") else self.exact_log_det_jac(x_mid, gamma)
         return x1, delta
 
     def forward(self, x0 : Tensor, return_traj : bool = False, dirs : Tensor | None = None) :
@@ -3140,6 +3672,9 @@ class FHMC(torch.nn.Module):
         reduced_flip: bool = True,
         method = "picard",
         reg: float = 0.05,
+        jacobian: str = "exact",
+        jacobian_mc: int = 1,
+        russian_roulette: float = 0.5,
     ):
         super().__init__()
         self.randers_cometric = randers_cometric
@@ -3154,11 +3689,13 @@ class FHMC(torch.nn.Module):
         self.reg = reg
         self.log2pi = math.log(2.0 * math.pi)
 
-        # Forward-mode outer Jacobian: the field has as many outputs as inputs
-        # (2d), but forward-over-(inner reverse) is markedly cheaper here than
-        # reverse-over-reverse (measured ~5s -> ~1s per step at d = 11).
-        self.f = torch.vmap(self._f_single)
-        self.df = torch.vmap(torch.func.jacfwd(self._f_single))
+        # Batched analytic field (see _f_batched). Outer Jacobian by forward
+        # mode over the inner reverse passes (fwd-over-rev; fwd-over-fwd
+        # through the custom gammaincc jvp is NOT trusted at second order).
+        # _f_batched has no internal forward-mode AD, so the matrix-free
+        # log-det estimator (jacobian="estimate") is usable on it.
+        self.f = self._f_batched
+        self.df = self._df_batched
         self.momentum_sampler = MomentumSampler(randers_cometric)
         self.integrator = ImplicitMidpointIntegrator(
             self.f,
@@ -3166,7 +3703,10 @@ class FHMC(torch.nn.Module):
             gamma,
             l,
             N_fx,
-            method
+            method,
+            jacobian=jacobian,
+            jacobian_mc=jacobian_mc,
+            russian_roulette=russian_roulette,
         )
 
     # ------------------------------------------------------------------
@@ -3302,107 +3842,124 @@ class FHMC(torch.nn.Module):
         asym = -(1.0 + (a - 1.0) / x + (a - 1.0) * (a - 2.0) / x ** 2)
         return torch.where(safe, exact, asym)
 
-    def _H_reg_single(self, x: Tensor) -> Tensor:
-        """Regularised Hamiltonian on the concatenated state x = (z, p) of shape (2d,)."""
-        d = x.shape[-1] // 2
-        return self.H_tilde_reg(x[:d].unsqueeze(0), x[d:].unsqueeze(0)).squeeze(0)
-
-    def _C_single(self, x: Tensor) -> Tensor:
+    def _f_batched(self, x: Tensor) -> Tensor:
         """
-        Correction matrix C(x) = I + sigma(F*) grad_p tau p^T / F*^2 built
-        from the regularised quantities. x of shape (2d,), output (d, d).
-        """
-        d = x.shape[-1] // 2
-        z, p = x[:d], x[d:]
+        Batched vector field of the corrected dynamics f(x) = C grad H_tilde
+        - div(Gamma), with C = I + a u p^T built from the regularised
+        quantities (a := sigma(F)/F^2, u := grad_p tau). Everything is reduced to closed-form
+        algebra in the scalars q = p^T G* p, s = <w*, p>, n = sqrt(q + delta),
+        F = n + s, using u = grad_p tau = alpha G* p + beta w* with
 
-        def tau_p(p_: Tensor) -> Tensor:
-            return self.tau_reg(z.unsqueeze(0), p_.unsqueeze(0)).squeeze(0)
+            alpha = -(d+1) (1/(nF) - 1/n^2),  beta = -(d+1)/F,
 
-        grad_tau = torch.func.grad(tau_p)(p)
-        F = self.F_star_reg(z.unsqueeze(0), p.unsqueeze(0)).squeeze(0)
-        I = torch.eye(d, device=x.device, dtype=x.dtype)
-        return I + self.sigma(F, d) * torch.outer(grad_tau, p) / F ** 2
+        so that the HVP (d_p u) p and all p-derivatives are explicit. The only
+        AD passes left are batch-level and reverse-mode (keeping the outer
+        jacfwd for df in the verified fwd-over-rev regime):
 
-    def _f_single_ref(self, x: Tensor) -> Tensor:
-        """
-        Reference implementation of the field (divergence terms by autodiff of
-        C). Correct but expensive: J_C has d^2 outputs, and differentiating it
-        again for df costs ~d^2 backward passes. Kept for validation only; the
-        production field is _f_single below.
+          1. grad_z of U + log sigma_BH (one pass),
+          2. jacrev of the metric pair z -> (G*(z) p, w*(z)) via the
+             batch-sum trick: its traces give div_z(G* p) and div_z w*, and
+             its contractions with p give grad_z q and grad_z s -- hence
+             grad_z n, grad_z F, grad_z tau and div_z u for free.
+
+        x (b, 2d) -> (b, 2d).
         """
         d = x.shape[-1] // 2
-        grad_H = torch.func.grad(self._H_reg_single)(x)
-        g_z, g_p = grad_H[:d], grad_H[d:]
-        C = self._C_single(x)
-        J_C = torch.func.jacrev(self._C_single)(x)  # (d, d, 2d) : dC_ij / dx_k
-        div_p_C = torch.einsum("ijj->i", J_C[..., d:])
-        div_z_Ct = torch.einsum("jij->i", J_C[..., :d])
-        f_z = C @ g_p - div_p_C
-        f_p = -C.T @ g_z + div_z_Ct
-        return torch.cat([f_z, f_p])
-
-    def _f_single(self, x: Tensor) -> Tensor:
-        """
-        Vector field of the corrected dynamics on a single state x = (z, p):
-
-            f_z = C grad_p H_tilde - div_p C
-            f_p = -C^T grad_z H_tilde + div_z C^T
-
-        with C = I + a u p^T,  a := sigma(F)/F^2,  u := grad_p tau. The
-        divergence terms of Gamma are expanded ANALYTICALLY,
-
-            div_p C   = a (d u + (d_p u) p) + a'(F) (F - delta/n_delta) u
-            div_z C^T = p [ a div_z u + a'(F) (grad_z F . u) ]
-
-        with a'(F) = sigma'(F)/F^2 - 2 sigma(F)/F^3 and sigma' given by the
-        exact ODE identity sigma'(t) = sigma(t) (t + (3-d)/t) + t. This
-        removes the d^2-output Jacobian of C from the field: only a
-        Hessian-vector product (jvp of grad_p tau along p) and one mixed
-        d x d Jacobian trace remain, which makes df = jacfwd(f) both correct
-        (fwd-over-rev; fwd-over-fwd through the custom gammaincc jvp is NOT
-        trusted at second order) and ~10x cheaper. Validated against
-        _f_single_ref and finite differences. Output shape (2d,).
-        """
-        d = x.shape[-1] // 2
-        z, p = x[:d], x[d:]
+        z, p = x[:, :d], x[:, d:]
         delta = (self.reg ** 2) * d
+        A = -(d + 1.0)
 
-        grad_H = torch.func.grad(self._H_reg_single)(x)
-        g_z, g_p = grad_H[:d], grad_H[d:]
+        G_star = self.randers_cometric.G_star(z)      # (b, d, d)
+        w_star = self.randers_cometric.omega_star(z)  # (b, d)
+        g = torch.einsum("bij,bj->bi", G_star, p)     # G* p
+        q = (p * g).sum(-1)
+        s = (w_star * p).sum(-1)
+        n = torch.sqrt(q + delta)
+        F = n + s
 
-        def tau_zp(z_: Tensor, p_: Tensor) -> Tensor:
-            return self.tau_reg(z_.unsqueeze(0), p_.unsqueeze(0)).squeeze(0)
+        # -- scalar z-gradients (one graph, three cotangent passes):
+        # U + log sigma_BH, q = p^T G* p, s = <w*, p> --
+        def scalars(z_: Tensor) -> Tensor:
+            G_ = self.randers_cometric.G_star(z_)
+            w_ = self.randers_cometric.omega_star(z_)
+            q_ = torch.einsum("bi,bij,bj->b", p, G_, p)
+            s_ = (w_ * p).sum(-1)
+            return torch.stack([
+                (self.U(z_) + self.log_sigma_BH(z_)).sum(), q_.sum(), s_.sum()
+            ])
 
-        def F_of_z(z_: Tensor) -> Tensor:
-            n_d, wp = self._randers_terms_reg(z_.unsqueeze(0), p.unsqueeze(0))
-            return (n_d + wp).squeeze(0)
+        S = torch.func.jacrev(scalars)(z)              # (3, b, d)
+        gU, grad_q, grad_s = S[0], S[1], S[2]
+        grad_n = grad_q / (2.0 * n)[:, None]
+        grad_F = grad_n + grad_s                       # = gF_z
 
-        # u = grad_p tau and the HVP (d_p u) p in a single jvp call
-        u_of_p = lambda p_: torch.func.grad(tau_zp, argnums=1)(z, p_)
-        u, Hu_p = torch.func.jvp(u_of_p, (p,), (p,))
-        # div_z u: trace of the mixed Jacobian d(grad_p tau)/dz. jacrev keeps
-        # the outer jacfwd(f) in the verified fwd-over-rev regime (no
-        # fwd-over-fwd through eigh).
-        u_of_z = lambda z_: torch.func.grad(tau_zp, argnums=1)(z_, p)
-        div_z_u = torch.einsum("ii->", torch.func.jacrev(u_of_z)(z))
-        gF_z = torch.func.grad(F_of_z)(z)
+        # -- u = alpha g + beta w and its derivatives (closed form) --
+        alpha = A * (1.0 / (n * F) - 1.0 / n ** 2)
+        beta = A / F
+        alpha_n = A * (-1.0 / (n ** 2 * F) + 2.0 / n ** 3)
+        alpha_F = -A / (n * F ** 2)
+        beta_F = -A / F ** 2
+        u = alpha[:, None] * g + beta[:, None] * w_star
+        
+        Dp_F = F - delta / n                           # grad_p F . p = q/n + s
+        # HVP (d_p u) p: D_p g = g, D_p alpha = alpha_n q/n + alpha_F Dp_F.
+        Hu_p = (
+            (alpha + alpha_n * q / n + alpha_F * Dp_F)[:, None] * g
+            + (beta_F * Dp_F)[:, None] * w_star
+        )
 
-        n_delta, wstar_p = [t.squeeze(0) for t in
-                            self._randers_terms_reg(z.unsqueeze(0), p.unsqueeze(0))]
-        F = n_delta + wstar_p
+        # -- div_z u = <grad_z alpha, g> + <grad_z beta, w> + tr d_z(alpha V + beta W)
+        # with V = G* p, W = w*. alpha, beta are captured (constant for the
+        # inner jacrev over z_, still differentiated by any outer transform),
+        # so one d-output jacrev replaces the two separate Jacobians. The
+        # batch-sum trick yields per-sample rows since the metric is
+        # batch-diagonal. --
+        def Y(z_: Tensor) -> Tensor:
+            V = torch.einsum("bij,bj->bi", self.randers_cometric.G_star(z_), p)
+            W = self.randers_cometric.omega_star(z_)
+            return (alpha[:, None] * V + beta[:, None] * W).sum(dim=0)
+
+        J_Y = torch.func.jacrev(Y)(z).permute(1, 0, 2)  # (b, d, d)
+        grad_alpha_z = alpha_n[:, None] * grad_n + alpha_F[:, None] * grad_F
+        grad_beta_z = beta_F[:, None] * grad_F
+        div_z_u = (
+            (grad_alpha_z * g).sum(-1)
+            + (grad_beta_z * w_star).sum(-1)
+            + torch.einsum("bii->b", J_Y)
+        )
+
+        # -- gradients of H_tilde_reg = U + log sigma_BH + F^2/2 + tau --
+        grad_tau_z = A * (grad_F / F[:, None] - grad_n / n[:, None])
+        g_z = gU + F[:, None] * grad_F + grad_tau_z
+        g_p = F[:, None] * (g / n[:, None] + w_star) + u
+
+        # -- assembly: f_z = C grad_p H - div_p C, f_p = -C^T grad_z H + div_z C^T --
         sig = self.sigma(F, d)
-        sig_prime = sig * (F + (3.0 - d) / F) + F        # exact ODE identity
+        sig_prime = sig * (F + (3.0 - d) / F) + F
         a = sig / F ** 2
-        a_prime = sig_prime / F ** 2 - 2 * sig / F ** 3
+        a_prime = sig_prime / F ** 2 - 2.0 * sig / F ** 3
 
-        C_gp = g_p + a * u * (p @ g_p)                   # C grad_p H
-        Ct_gz = g_z + a * p * (u @ g_z)                  # C^T grad_z H
-        div_p_C = a * (d * u + Hu_p) + a_prime * (F - delta / n_delta) * u
-        div_z_Ct = p * (a * div_z_u + a_prime * (gF_z @ u))
+        C_gp = g_p + (a * (p * g_p).sum(-1))[:, None] * u
+        Ct_gz = g_z + (a * (u * g_z).sum(-1))[:, None] * p
+        div_p_C = a[:, None] * (d * u + Hu_p) + (a_prime * (F - delta / n))[:, None] * u
+        div_z_Ct = (a * div_z_u + a_prime * (grad_F * u).sum(-1))[:, None] * p
 
         f_z = C_gp - div_p_C
         f_p = -Ct_gz + div_z_Ct
-        return torch.cat([f_z, f_p])
+        return torch.cat([f_z, f_p], dim=-1)
+
+    def _df_batched(self, x: Tensor) -> Tensor:
+        """
+        Per-sample Jacobians of the field, (b, 2d) -> (b, 2d, 2d), by forward
+        mode over the BATCHED field: since f is batch-diagonal, the Jacobian
+        of delta -> f(x + delta) with a shared shift delta in R^{2d} is
+        exactly the stack of per-sample Jacobians df_i/dx_j. The primal graph
+        is built once and jacfwd pushes its 2d dual tangents through it
+        batched, instead of vmapping 2d-tangent jacfwd over b per-sample
+        graphs (fwd-over-rev throughout, as required by the custom gammaincc).
+        """
+        zero = torch.zeros(x.shape[-1], device=x.device, dtype=x.dtype)
+        return torch.func.jacfwd(lambda dlt: self._f_batched(x + dlt))(zero)
 
     # ------------------------------------------------------------------
     # MCMC
@@ -3478,16 +4035,14 @@ class FHMC(torch.nn.Module):
         for k in pbar:
             p_0 = self.sample_momentum(z)
             x_0 = torch.cat([z, p_0], dim=-1)
-            try:
-                x_l, log_det = self.integrator(x_0, dirs=dirs)
-                alpha = self.proposal_rate(x_0, x_l, log_det)
-            except _LinAlgError:
-                # @TODO: Handle this error properly.
-                # Not the best way to handle this error.
-                # Because a single LinAlgError for a given sample
-                # will stop the whole process even for other valid samples.
-                alpha = torch.zeros(z.shape[0], device=z.device)
-                x_l = x_0.clone()
+            # A linear-algebra failure is batch-wide and anonymous, so isolate
+            # the offending samples instead of rejecting the whole batch: one
+            # chain that has left the domain must not veto the others.
+            x_l, log_det, valid = integrate_isolating_failures(
+                self.integrator, x_0, dirs
+            )
+            alpha = self.proposal_rate(x_0, x_l, log_det)
+            alpha = torch.where(valid, alpha, torch.zeros_like(alpha))
             z_l = x_l[:, :d]
 
             if not self.skip_acceptance:
@@ -3500,15 +4055,17 @@ class FHMC(torch.nn.Module):
                         # applied to the integration direction:
                         # P_flip = max(0, alpha(LFζ) - alpha(Lζ))
                         # Only computed for rejected samples.
-                        try:
-                            x_l_flip, log_det_flip = self.integrator(
-                                x_0[rej_idx], dirs=-dirs[rej_idx]
+                        x_l_flip, log_det_flip, valid_flip = (
+                            integrate_isolating_failures(
+                                self.integrator, x_0[rej_idx], -dirs[rej_idx]
                             )
-                            alpha_flip_rej = self.proposal_rate(
-                                x_0[rej_idx], x_l_flip, log_det_flip
-                            )
-                        except _LinAlgError:
-                            alpha_flip_rej = torch.zeros(rej_idx.numel(), device=z.device)
+                        )
+                        alpha_flip_rej = self.proposal_rate(
+                            x_0[rej_idx], x_l_flip, log_det_flip
+                        )
+                        alpha_flip_rej = torch.where(
+                            valid_flip, alpha_flip_rej, torch.zeros_like(alpha_flip_rej)
+                        )
                         alpha_flip = torch.zeros_like(alpha)
                         alpha_flip[rej_idx] = alpha_flip_rej
                         p_flip = (alpha_flip - alpha).clamp(min=0)
