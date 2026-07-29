@@ -1287,8 +1287,8 @@ class CentroidsCometric(CoMetric):
         temperature: float = 1.0,
         reg_coef: float = 1e-3,
         K: int = None,
-        metric_weight: bool = True,
-        temperature_scale: float = 5.0,
+        metric_weight: bool = False,
+        temperature_scale: float = 1.0,
     ):
         super().__init__()
 
@@ -1484,7 +1484,8 @@ class LANDCometric(CoMetric):
     alpha : int
         The alpha parameter of the LAND metric. It controls the shape of the metric. Default to 1.
     sigma : float
-        The sigma parameter of the LAND metric. It controls the width of the Gaussian kernel. Default to 1.
+        The sigma parameter of the LAND metric. It controls the width of the Gaussian kernel.
+        Default to None, ie will be tuned automatically.
     reg_coef : float
         The regularization coefficient. Default to 1e-5.
     K: int, Default None
@@ -1495,7 +1496,7 @@ class LANDCometric(CoMetric):
         self,
         centroids: Tensor,
         alpha: int = 1,
-        sigma: float = 1.0,
+        sigma: float = None,
         reg_coef: float = 1e-5,
         K: int = None,
     ):
@@ -1507,40 +1508,58 @@ class LANDCometric(CoMetric):
         assert alpha > 0 and isinstance(
             alpha, int
         ), f"Alpha should be a positive integer, got {alpha}"
-        assert sigma > 0, f"Sigma should be a positive float, got {sigma}"
         assert reg_coef >= 0, f"Reg_coef should be a non-negative float, got {reg_coef}"
 
         self.register_buffer("centroids", centroids)
         self.register_buffer("alpha", Tensor([alpha]))
+        if sigma is None:
+            sigma = self.set_sigma()
         self.register_buffer("sigma", Tensor([sigma]))
         self.register_buffer("reg_coef", Tensor([reg_coef]))
 
         if K is not None:
-            assert (
-                K > 0 and K <= centroids.shape[0]
-            ), f"K should be in the range (0, {centroids.shape[0]=}], got {K}"
-            self.centroids = self.process_centroids(centroids, K)
+            if K > self.centroids.shape[0]:
+                print(
+                    f"Warning: K={K} is greater than the number of centroids {self.centroids.shape[0]}. Using all centroids."
+                )
+                K = self.centroids.shape[0]
+            self.process_centroids(K)
 
-        self.K = centroids.shape[0]
-        self.d = centroids.shape[1]
+        self.K = self.centroids.shape[0]
+        self.d = self.centroids.shape[1]
 
-    def process_centroids(self, centroids: Tensor, K: int) -> Tensor:
+    def process_centroids(self, K: int) -> None:
         """
-        Compute the K-medoids clustering of the centroids and return the new centroids.
+        Process the centroids to select K representative centroids using K-Medoids clustering.
 
         Parameters:
-        centroids : Tensor (N,d)
-            The original centroids
         K : int
-            The number of centroids to select
+            The number of centroids to select. If K=-1, use all centroids.
         """
-        dst_mat = torch.cdist(centroids, centroids, p=2).sqrt().cpu().numpy()
+        if K == -1:
+            self.sigma = self.set_sigma()
+            return
+
+        dst_mat = torch.cdist(self.centroids, self.centroids, p=2).sqrt().cpu().numpy()
         kmedoids_model = kmedoids.KMedoids(
             n_clusters=K, metric="precomputed", random_state=1312
         )
         kmedoids_model.fit(dst_mat)
-        centroids_idx = kmedoids_model.medoid_indices_
-        return centroids[centroids_idx]
+        self.centroids = self.centroids[kmedoids_model.medoid_indices_]
+        self.sigma = self.set_sigma()
+
+    def set_sigma(self) -> float:
+        """
+        Set the sigma to the maximum minimum distance between centroids scaled by sigma_scale.
+        """
+        dst_mat = torch.cdist(self.centroids, self.centroids, p=2)
+        dst_mat[dst_mat == 0] = float("inf")  # Avoid zero self distances
+        # min_distances, _ = dst_mat.min(dim=1)
+        # self.sigma = min_distances.max()
+        # Find distance to second closest centroid
+        sorted_distances, _ = torch.sort(dst_mat, dim=1)
+        second_min_distances = sorted_distances[:, 1]
+        return second_min_distances.max()
 
     def h(self, x: Tensor) -> Tensor:
         """
@@ -2268,7 +2287,7 @@ class RandersMetrics(FinslerMetric):
         1-form to use for the Randers metric. It should be a function that takes
         in points on the manifold and outputs a vector of the same size as the points.
     beta : float
-        Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1]. W
+        Scaling factor for the 1-form. Default is 1.0. Must be within the range [0,1].
         When beta=0, the Randers metric reduces to the base cometric.
     """
 
@@ -2284,12 +2303,30 @@ class RandersMetrics(FinslerMetric):
         assert 0 <= beta <= 1, "Beta must be in the range [0, 1]"
         self.beta = beta
 
-    def forward(self, x: Tensor, v: Tensor) -> Tensor:
-        x_norm = self.base_cometric.metric(x, v).sqrt()
-        omega_x = self.omega(x)
-        omega_x_v = torch.einsum("bi,bi->b", omega_x, v)
+    def beta_form(self, x: Tensor, v: Tensor) -> Tensor:
+        """
+        Computes the beta form of the Randers metric.
 
-        F = x_norm + self.beta * omega_x_v
+        Parameters:
+        ----------
+        x : Tensor (b,d)
+            Points in the manifold
+        v : Tensor (b,d)
+            Tangent vectors at x
+
+        Returns:
+        -------
+        beta : Tensor (b,)
+            Beta form of the Randers metric at x in the direction of v
+        """
+        omega_x = self.omega(x)
+        beta = torch.einsum("bi,bi->b", omega_x, v)
+        return self.beta * beta
+
+    def forward(self, x: Tensor, v: Tensor) -> Tensor:
+        alpha = self.base_cometric.metric(x, v).sqrt()
+        beta = self.beta_form(x, v)
+        F = alpha + beta
         return F
 
     def fund_tensor_analytic_(self, z: Tensor, v: Tensor) -> Tensor:
