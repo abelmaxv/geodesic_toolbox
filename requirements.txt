@@ -1,33 +1,35 @@
-# Direct dependencies of geodesic_toolbox, pinned to the versions in the
-# `geodesic_toolbox_bis` conda env (Python 3.12.12).
+# Dependencies of geodesic_toolbox, pinned to the versions the benchmarks were
+# validated against (python 3.12.2). Verified by installing into a clean venv.
 #
-# NOTE: that env is conda-managed. For an exact clone prefer conda (see below);
-# this pip file is the portable fallback for a plain venv on the remote:
 #   python3 -m venv .venv && source .venv/bin/activate
 #   pip install -r requirements.txt
-#   pip install -e .            # install the geodesic_toolbox package itself
+#   pip install -e .
 #
-# torch/torchvision below are macOS (CPU/MPS) builds. On a CUDA GPU machine,
-# install the matching CUDA wheels INSTEAD, e.g.:
-#   pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu124
+# torch below is a macOS (CPU/MPS) build; on CUDA install the matching wheel
+# instead: pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cu124
 
-# ── core (needed by src/, benchmarks/, animations/) ──────────────────────────
-torch==2.10.0
+# ── required to import geodesic_toolbox (all imported at module scope in src/) ─
+torch==2.12.1
 numpy==1.26.4
 scipy==1.15.2
-matplotlib==3.10.8
-pandas==3.0.0
 scikit-learn==1.6.1
-tqdm==4.67.3
-hamiltorch==0.4.1
-ipykernel==7.2.0          # to run the notebooks
+einops==0.8.2
+kmedoids==0.5.5
+torchdiffeq==0.2.5
+networkx==3.4.2
+tqdm==4.67.1
 
-# ── extras used by some kept notebooks (uncomment as needed) ─────────────────
-# kmedoids==0.5.3.1         # centroid-metric notebook (CentroidsCometric)
-# botorch==0.17.2           # parameter-tuning notebooks (Bayesian optimization)
-# gpytorch==1.15.2          #   "
-# torchdiffeq==0.2.5
+# ── required to run the benchmarks ───────────────────────────────────────────
+# hamiltorch (benchmark_utils.NUTS) is not on PyPI; it must come from git.
+hamiltorch @ git+https://github.com/AdamCobb/hamiltorch.git@19b627b2aabc77c1b4b78db0f860372eb1bf9778
+pandas==2.2.2             # benchmarks/blr_target.py
+
+# ── plots and notebooks ──────────────────────────────────────────────────────
+matplotlib==3.10.1
+ipykernel==6.28.0
+
+# ── extras for some notebooks (uncomment as needed) ──────────────────────────
+# botorch==0.17.2           # parameter-tuning notebooks
+# gpytorch==1.15.2
 # torchvision==0.25.0
-# pyro-ppl was installed from a git checkout (version 1.9.1+ab0491a); if a
-# notebook needs it, install from source rather than PyPI:
-#   pip install "pyro-ppl @ git+https://github.com/pyro-ppl/pyro.git"
+# pyro-ppl @ git+https://github.com/pyro-ppl/pyro.git
